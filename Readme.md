@@ -1,5 +1,17 @@
 
-# Init
+# Decawave ranging demo using DWM3001C with Zephyr
+
+Perform double sided two way ranging both as initiator and responder.
+It also listens to others's DS TWR to get the single-sided TWR from the other modules.
+
+**Example:**
+
+In a setup with 3 modules: Alice, Bob and Dave.
+When Alice initiate a double-sided TWR with Bob, Bob compute the DS TWR, while Alice compute the single-sided TWR.
+Dave listen passively and compute the SS TWR between Alice and Bob.
+
+
+## Getting started
 
 Create a Zephyr workspace directory:
 
@@ -19,7 +31,7 @@ pip install west
 Get this repository:
 
 ```
-west init -m git@github.com:lmapii/practical-zephyr-t2-empty-ws.git
+west init -m https://github.com/Fabien-B/zephyr_decawave_ranging.git
 cd app
 ```
 
@@ -53,3 +65,4 @@ Flash:
 west flash -r jlink
 west flash -r blackmagicprobe
 ```
+
