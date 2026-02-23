@@ -1,0 +1,11 @@
+# DecaWave DWM3001C board configuration
+
+# Copyright (c) 2019 Stéphane D'Alu
+# SPDX-License-Identifier: Apache-2.0
+
+if BOARD_DECAWAVE_DWM3001C
+
+config I2C
+	default SENSOR
+
+endif # BOARD_DECAWAVE_DWM3001C

@@ -1,0 +1,19 @@
+identifier: decawave_dwm3001c
+name: Decawave-DWM3001C
+type: mcu
+arch: arm
+ram: 128
+flash: 512
+vendor: decawave
+toolchain:
+  - zephyr
+  - gnuarmemb
+supported:
+  - adc
+  - usb_device
+  - ble
+  - gpio
+  - pwm
+  - watchdog
+  - counter
+  - netif:openthread
