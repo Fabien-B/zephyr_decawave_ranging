@@ -1,0 +1,67 @@
+{
+    "version" : "2.0.0",
+    "tasks": [
+        {
+            "label": "Build",
+            "command": "${workspaceFolder}/../zephEnv/bin/west",
+            "args" : ["build", "-b", "decawave_dwm3001c", "./"],
+            "options": {
+                "statusbar": {
+                    "label": "$(gear) Build"
+                }
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+        },
+        {
+            "label": "JLink Flash",
+            "command": "${workspaceFolder}/../zephEnv/bin/west",
+            "args" : ["flash", "-r", "jlink"],
+            "dependsOn" : [
+                "Build"
+            ],
+            "options":{
+                "statusbar" : {
+                 "label": "$(arrow-right) JLink Flash"
+                },
+            },
+        },
+        {
+            "label": "BMP Flash",
+            "command": "${workspaceFolder}/../zephEnv/bin/west",
+            "args" : ["flash", "-r", "blackmagicprobe"],
+            "dependsOn" : [
+                "Build"
+            ],
+            "options":{
+                "statusbar" : {
+                 "label": "$(arrow-right) BMP Flash"
+                },
+            },
+        },
+        {   
+            "label" : "Clean",
+            "command":"rm", 
+            "args": ["-rf", "${workspaceFolder}/build"],
+            "options": {
+                "statusbar": {
+                    "label": "$(trash) Clean"
+                }
+            }
+        },
+        {   
+            "label" : "Serial Monitor",
+            "command":"minicom", 
+            "args": [
+                "-D","/dev/bmp-serial"
+            ],
+            "options": {
+                "statusbar": {
+                    "label": "$(plug) Serial monitor "
+                }
+            }
+        },
+
+    ],
+}

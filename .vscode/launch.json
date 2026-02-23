@@ -1,0 +1,29 @@
+{
+    "configurations": [
+    {
+        "cwd": "${workspaceFolder}",
+        "executable": "${workspaceFolder}/build/zephyr/zephyr.elf",
+        "name": "JLink",
+        "request": "launch",
+        "type": "cortex-debug",
+        "device": "nrf52833",
+        "runToEntryPoint": "main",
+        "showDevDebugOutput": "none",
+        "servertype": "jlink",
+        "svdFile": "${workspaceFolder}/nrf52833.svd"
+    },
+    {
+        "cwd": "${workspaceFolder}",
+        "executable": "${workspaceFolder}/build/zephyr/zephyr.elf",
+        "name": "BMP",
+        "request": "launch",
+        "type": "cortex-debug",
+        "device": "nrf52833",
+        "runToEntryPoint": "main",
+        "showDevDebugOutput": "none",
+        "servertype": "bmp",
+        "BMPGDBSerialPort": "/dev/bmp-gdb",
+        "svdFile": "${workspaceFolder}/nrf52833.svd"
+    }
+    ]
+}
