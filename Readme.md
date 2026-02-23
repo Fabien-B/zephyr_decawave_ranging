@@ -34,17 +34,16 @@ Get this repository:
 west init -m https://github.com/Fabien-B/zephyr_decawave_ranging.git
 cd app
 ```
+Get dependencies:
+
+```
+west update
+```
 
 Install the other required python modules:
 
 ```
 pip install -r requirements.txt
-```
-
-Get dependencies:
-
-```
-west update
 ```
 
 Install the compilation toolchain:
@@ -56,7 +55,7 @@ west sdk install --toolchains arm-zephyr-eabi
 Build:
 
 ```
-west build -b decawave_dwm3001cdk ./
+west build -b decawave_dwm3001c ./
 ```
 
 Flash:
