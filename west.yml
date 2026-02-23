@@ -1,0 +1,23 @@
+manifest:
+  # lowest version of the manifest file schema that can parse this file’s data
+  version: 0.8
+
+  self:
+    path: app
+
+  projects:
+    - name: zephyr
+      revision: v4.3.0
+      url: https://github.com/zephyrproject-rtos/zephyr
+      import:
+        path-prefix: deps
+        file: west.yml
+        name-allowlist:
+          - hal_nordic
+          - cmsis_6
+
+    - name: zephyr-dw3000-decadriver
+      path: deps/zephyr-dw3000-decadriver
+      url: https://github.com/br101/zephyr-dw3000-decadriver.git
+      revision: 717751e248d5becf79838910c404b0193e8f88cc
+

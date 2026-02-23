@@ -1,0 +1,11 @@
+west
+patool
+requests
+PyYAML
+packaging
+tqdm
+semver
+jsonschema
+pyelftools
+
+
