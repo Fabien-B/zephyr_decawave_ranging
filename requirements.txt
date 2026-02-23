@@ -7,5 +7,5 @@ tqdm
 semver
 jsonschema
 pyelftools
-
+pylink-square
 

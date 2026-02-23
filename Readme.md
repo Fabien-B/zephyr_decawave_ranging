@@ -41,16 +41,16 @@ Install the other required python modules:
 pip install -r requirements.txt
 ```
 
-Install the compilation toolchain:
-
-```
-west sdk install --toolchains arm-zephyr-eabi
-```
-
 Get dependencies:
 
 ```
 west update
+```
+
+Install the compilation toolchain:
+
+```
+west sdk install --toolchains arm-zephyr-eabi
 ```
 
 Build:
