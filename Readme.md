@@ -65,3 +65,6 @@ west flash -r jlink
 west flash -r blackmagicprobe
 ```
 
+Note: If you are using a JLink probe, install the J-Link software first: [https://www.segger.com/downloads/jlink/](https://www.segger.com/downloads/jlink/).
+
+
