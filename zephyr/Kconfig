@@ -1,0 +1,3 @@
+config PDEC_PRINT_RANGING
+    bool "Print ranging results"
+    default y

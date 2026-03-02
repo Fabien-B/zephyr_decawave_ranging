@@ -79,3 +79,43 @@ uint64_t get_tx_timestamp_u64(void);
 uint16_t get_my_id();
 
 void send_poll(uint16_t dst_id, bool double_sided);
+
+// frame control:
+// 2:0    001  data
+// 3      0    no security
+// 4      0    no pending
+// 5      0    no ack
+// 6      1    pan id compression  --> no src pan id
+// 9:7    000  
+// 11:10  10   dest addr mode: 16-bit short address
+// 13:12  00   IEEE 802.15.4‑2003
+// 15:14  10   src addr mode:  16-bit short address
+#define FRAME_CONTROL 0x8841
+
+/* Default antenna delay values for 64 MHz PRF. See NOTE 2 below. */
+#define TX_ANT_DLY 16385
+#define RX_ANT_DLY 16385
+
+
+
+// delay between frame RX, and the delayed TX
+#define POLL_RX_TO_RESP_TX_DLY_UUS 1500
+
+// delay before enabling RX after end of TX
+#define POLL_TX_TO_RESP_RX_DLY_UUS 1000
+
+
+#define RESP_RX_TIMEOUT_UUS 1200
+
+
+#define SPEED_OF_LIGHT   (299702547)    //in m/s
+#define FRAME_LEN_MAX    (127)
+#define FRAME_LEN_MAX_EX (1023)
+
+#define RXFLEN_MASK    0x0000007FUL /* Receive Frame Length (0 to 127) */
+#define RXFL_MASK_1023 0x000003FFUL /* Receive Frame Length Extension (0 to 1023) */
+
+/* UWB microsecond (uus) to device time unit (dtu, around 15.65 ps) conversion factor.
+ * 1 uus = 512 / 499.2 µs and 1 µs = 499.2 * 128 dtu. */
+ // F*dt = (499.2MHz*128) * 1e-6s = 63897.6   timestamp increment per microseconds
+#define UUS_TO_DWT_TIME 63898

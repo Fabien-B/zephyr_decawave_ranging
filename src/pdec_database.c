@@ -1,13 +1,16 @@
 #include "pdec_database.h"
 
+#define NUM_DEVICES_MAX 10
 
 // Low 16bits of the nrf52833 device ID: NRF_FICR->DEVICEID[0]
 uint16_t devices[] = {
-	0x0839,
 	0xc550,
+	0x0839,
 	0xdc12,
     0 // Must end with 0 to detect the end of the array
 };
+
+double distances[(NUM_DEVICES_MAX*(NUM_DEVICES_MAX-1))/2] = {0};
 
 
 // to store the clock offset of every other agents
@@ -40,3 +43,33 @@ double get_clock_offset(uint16_t id) {
     // not found, return 1
     return 1;
 }
+
+
+void set_distance(uint16_t a, uint16_t b, double distance) {
+    int index = 0;
+    for(int i=0; devices[i] != 0; i++) {
+        for(int j=i+1; devices[j] != 0; j++) {
+            if((devices[i] == a && devices[j] == b) || (devices[i] == b && devices[j] == a)) {
+                // TODO filtrage ?
+                distances[index] = distance;
+            }
+            index += 1;
+        }
+    }
+}
+
+double get_distance(uint16_t a, uint16_t b) {
+    int index = 0;
+    for(int i=0; devices[i] != 0; i++) {
+        for(int j=i+1; devices[j] != 0; j++) {
+            if((devices[i] == a && devices[j] == b) || (devices[i] == b && devices[j] == a)) {
+                return distances[index];
+            }
+            index += 1;
+        }
+    }
+    
+    // devices not found
+    return -1;
+}
+

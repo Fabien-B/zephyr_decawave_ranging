@@ -9,4 +9,5 @@ target_sources(app PRIVATE
     src/pdec_common.c
     src/pdec_initiator.c
     src/pdec_database.c
+    src/pdec_ranging.c
 )

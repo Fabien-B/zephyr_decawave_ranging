@@ -13,3 +13,7 @@ void set_clock_offset(uint16_t id, float clk_offset_ratio);
 
 // return 1 if not found
 double get_clock_offset(uint16_t id);
+
+void set_distance(uint16_t a, uint16_t b, double distance);
+double get_distance(uint16_t a, uint16_t b);
+
