@@ -46,12 +46,37 @@ typedef struct __attribute__((packed)) {
 } final_msg_t;
 
 
+
+typedef struct __attribute__((packed)) {
+    frame_header_t header;
+    uint64_t sync_ts;   // sync timestamp, in the clock of the master (the sender)
+    uint16_t chk;       // checksum automatically set by DW IC
+} sync_msg_t;
+
+typedef struct __attribute__((packed)) {
+    frame_header_t header;
+    uint32_t blink_id;
+    uint16_t chk;   // checksum automatically set by DW IC
+} blink_msg_t;
+
+typedef struct __attribute__((packed)) {
+    frame_header_t header;
+    uint32_t blink_id;
+    uint64_t blink_rx_ts;   // blink receive timestamp, in the clock of the master
+    uint16_t blink_snd_id;  // blink sender id
+    uint16_t chk;   // checksum automatically set by DW IC
+} blink_report_msg_t;
+
 union ranging_msg_u
 {
     frame_header_t header;
     poll_msg_t poll;
     resp_msg_t resp;
     final_msg_t final;
+
+    sync_msg_t sync;
+    blink_msg_t blink;
+    blink_report_msg_t blink_report;
 };
 
 
@@ -69,16 +94,28 @@ typedef enum {
     DF_DS_RANGING_POLL =  0xE2,
     DF_DS_RANGING_RESP =  0xE3,
     DF_DS_RANGING_FINAL = 0xE4,
+
+    DF_TDOA_SYNC = 0xE5,
+    DF_TDOA_BLINK = 0xE6,
+    DF_TDOA_BLINK_REPORT = 0xE7,
 } frame_role_t;
 
 
 int pdecInit(uint32_t* dev_id);
 uint64_t get_rx_timestamp_u64(void);
 uint64_t get_tx_timestamp_u64(void);
+uint64_t get_systime_u64(void);
+uint32_t wrap32_diff(uint32_t hi, uint32_t lo);
+uint64_t timestamp_diff(uint64_t hi, uint64_t lo);
+int64_t timestamp_diff_signed(uint64_t a, uint64_t b);
 
 uint16_t get_my_id();
 
+void send_sync();
+
+
 void send_poll(uint16_t dst_id, bool double_sided);
+
 
 // frame control:
 // 2:0    001  data
@@ -119,3 +156,4 @@ void send_poll(uint16_t dst_id, bool double_sided);
  * 1 uus = 512 / 499.2 µs and 1 µs = 499.2 * 128 dtu. */
  // F*dt = (499.2MHz*128) * 1e-6s = 63897.6   timestamp increment per microseconds
 #define UUS_TO_DWT_TIME 63898
+

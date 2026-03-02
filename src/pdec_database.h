@@ -17,3 +17,4 @@ double get_clock_offset(uint16_t id);
 void set_distance(uint16_t a, uint16_t b, double distance);
 double get_distance(uint16_t a, uint16_t b);
 
+uint8_t get_tdoa_index(uint16_t id);

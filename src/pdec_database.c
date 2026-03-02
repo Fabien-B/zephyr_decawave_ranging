@@ -73,3 +73,11 @@ double get_distance(uint16_t a, uint16_t b) {
     return -1;
 }
 
+uint8_t get_tdoa_index(uint16_t id) {
+    for(int i=0; devices[i] != 0; i++) {
+        if(id == devices[i]) {
+            return i;
+        }
+    }
+    return 255; // not found
+}

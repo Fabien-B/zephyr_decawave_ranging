@@ -1,6 +1,7 @@
 #include"pdec_common.h"
 #include "pdec_database.h"
 #include "pdec_ranging.h"
+#include "pdec_tdoa.h"
 
 #include <stdio.h>
 #include <zephyr/kernel.h>
@@ -150,6 +151,17 @@ static void cbRxOk(const dwt_cb_data_t *cb_data) {
     case DF_DS_RANGING_FINAL:
         handle_final_msg((final_msg_t*)header);
         break;
+    case DF_TDOA_SYNC:
+        handle_sync_msg((sync_msg_t*)header);
+        break;
+    case DF_TDOA_BLINK:
+        handle_blink_msg((blink_msg_t*)header);
+        break;
+    case DF_TDOA_BLINK_REPORT:
+        handle_blink_report_msg((blink_report_msg_t*)header);
+        break;
+    default:
+        printf("Unknown frame role: %d\n", header->frame_role);
     }
 }
 

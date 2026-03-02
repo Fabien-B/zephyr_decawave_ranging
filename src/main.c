@@ -15,6 +15,7 @@
 
 #include "pdec_common.h"
 #include "pdec_initiator.h"
+#include "pdec_tdoa.h"
 
 /* 1000 msec = 1 sec */
 #define SLEEP_TIME_MS   800
@@ -69,12 +70,19 @@ int main(void)
 
 	
 
-	pdecInitiatorStart();
-	// if(dede0 == 0xda220839) {
-	// }
-	// else if (dede0 == 0xab84c550) {
-	// 	pdecInitiatorStart();
-	// }
+	//pdecInitiatorStart();
+
+	k_msleep(100);
+
+	if(dede0 == 0x0839) {
+		pdecTdoaStart(TDOA_ROLE_MASTER);
+	}
+	else if (dede0 == 0xc550) {
+		pdecTdoaStart(TDOA_ROLE_BEACON);
+	}
+	else if (dede0 == 0xdc12) {
+		pdecTdoaStart(TDOA_ROLE_BLINKER);
+	}
 	
     return 0;
 }
