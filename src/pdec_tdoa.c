@@ -14,7 +14,7 @@
 #include <dw3000_spi.h>
 
 #define SYNC_DELAY 2000  //us
-#define SYNC_SLOT_TIME 10000  //us
+#define SYNC_SLOT_TIME 5000  //us
 
 
 #define SYNC_TASK_STACK_SIZE 1000
@@ -41,6 +41,8 @@ uint16_t blink_seq_nb = 0;
 double alpha = 1;
 int64_t beta = 0;
 
+uint16_t master_id = 0;
+
 void tdoa_init() {
     tx_msg.header.frame_control = FRAME_CONTROL;
     tx_msg.header.pan_id = MY_PAN_ID;
@@ -49,10 +51,10 @@ void tdoa_init() {
 
 void send_sync() {
     tx_msg.header.frame_control = FRAME_CONTROL;
+    tx_msg.header.seq_number = frame_seq_nb;
     tx_msg.header.pan_id = MY_PAN_ID;
     tx_msg.header.dst_id = BROADCAST_ID;
     tx_msg.header.src_id = get_my_id();
-    tx_msg.header.seq_number = frame_seq_nb;
     tx_msg.header.frame_role = DF_TDOA_SYNC;
 
     uint64_t systime = get_systime_u64()<<8;
@@ -75,7 +77,6 @@ void send_sync() {
     // dwt_forcetrxoff();
     // dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
     // dwt_setrxtimeout(0);
-    // status = LISTENING;
     // ret = dwt_starttx(DWT_START_TX_DELAYED);
     // // ret = dwt_starttx(DWT_START_TX_IMMEDIATE);
 
@@ -104,6 +105,9 @@ void handle_sync_msg(sync_msg_t* msg) {
 
     ////////////////////////////////////////////////////////////////////
     // update sync parameters
+    
+    master_id = msg->header.src_id;
+
     if(last_sync_rx_ts != 0 && last_sync_tx_ts != 0) {
         alpha = (double)timestamp_diff(sync_rx_ts, last_sync_rx_ts) / timestamp_diff(msg->sync_ts, last_sync_tx_ts);
         
@@ -115,21 +119,22 @@ void handle_sync_msg(sync_msg_t* msg) {
     }
     last_sync_rx_ts = sync_rx_ts;
     last_sync_tx_ts = msg->sync_ts;
+
     ////////////////////////////////////////////////////////////////////
     
     if(tdoa_role != TDOA_ROLE_BLINKER) {
         // beacons just wait for a BLINK or an other SYNC
         dwt_setrxtimeout(0);
-        status = LISTENING;
+        status = POLLING;
         dwt_rxenable(DWT_START_RX_IMMEDIATE);
     } else {
         // BLINKER will send a BLINK soon (first time slot after SYNC)
 
         tx_msg.header.frame_control = FRAME_CONTROL;
+        tx_msg.header.seq_number = frame_seq_nb;
         tx_msg.header.pan_id = MY_PAN_ID;
         tx_msg.header.dst_id = BROADCAST_ID;
         tx_msg.header.src_id = get_my_id();
-        tx_msg.header.seq_number = frame_seq_nb;
         tx_msg.header.frame_role = DF_TDOA_BLINK;
 
         // en dtu (499.2MHz*128)
@@ -174,17 +179,17 @@ void handle_blink_msg(blink_msg_t* msg) {
         _master_blink_rx_ts = blink_rx_ts;
         printf(">MBlink: %lld\n", blink_rx_ts);
         dwt_setrxtimeout(0);
-        status = LISTENING;
+        status = POLLING;
         dwt_rxenable(DWT_START_RX_IMMEDIATE);
         return;
     }
     
 
     
-    double distance = 0;    //get_distance(get_my_id(), msg->header.src_id);
-    int64_t dt = distance / (SPEED_OF_LIGHT*DWT_TIME_UNITS);
+    // double distance = get_distance(get_my_id(), master_id);
+    // int64_t dt = distance / (SPEED_OF_LIGHT*DWT_TIME_UNITS);
     
-    int64_t blink_ts_master = (blink_rx_ts - (beta + dt));
+    int64_t blink_ts_master = (blink_rx_ts - (beta));
     if(blink_ts_master < 0) {
         blink_ts_master += (int64_t)1<<40;
         plop = true;
@@ -204,7 +209,6 @@ void handle_blink_msg(blink_msg_t* msg) {
     tx_msg.blink_report.blink_rx_ts = blink_ts_master;
 
     // dwt_setrxtimeout(0);
-    // status = LISTENING;
     // dwt_rxenable(DWT_START_RX_IMMEDIATE);
 
     dwt_writetxdata(sizeof(tx_msg.blink_report), (uint8_t*)&tx_msg.blink_report, 0); /* Zero offset in TX buffer. */
@@ -242,9 +246,10 @@ void handle_blink_report_msg(blink_report_msg_t* msg) {
     // only the master process blik reports
     if(tdoa_role == TDOA_ROLE_MASTER) {
         static uint32_t blink_id = 0;
-        int64_t dt = timestamp_diff_signed(msg->blink_rx_ts, _master_blink_rx_ts) ;
+        int64_t dt = timestamp_diff_signed(_master_blink_rx_ts, msg->blink_rx_ts) ;
         double distance = dt * DWT_TIME_UNITS * SPEED_OF_LIGHT;
-        printf("dt: %llu - %llu = %lld -> %.2f\n", msg->blink_rx_ts, _master_blink_rx_ts, dt, distance);
+        //printf("dt: %llu - %llu = %lld -> %.2f\n", msg->blink_rx_ts, _master_blink_rx_ts, dt, distance);
+        printf("dt: %03lld -> %.2f\n", dt, distance);
         if(msg->blink_id != blink_id) {
             printf("\n\n");
         }
@@ -253,7 +258,7 @@ void handle_blink_report_msg(blink_report_msg_t* msg) {
 
 
     dwt_setrxtimeout(0);
-    status = LISTENING;
+    status = POLLING;
     // dwt_setrxaftertxdelay(0);
     dwt_rxenable(DWT_START_RX_IMMEDIATE);
 }
@@ -277,7 +282,11 @@ static void pdec_sync_task(void *, void *, void *) {
 
     // then BLINK
     while(true) {
-        send_sync();
+        for(int i=0;i<10; i++) {
+             send_sync();
+             k_msleep(200);
+        }
+        send_poll(0xc550, true);
         k_msleep(200);
     }
 }

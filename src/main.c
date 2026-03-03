@@ -75,13 +75,13 @@ int main(void)
 	k_msleep(100);
 
 	if(dede0 == 0x0839) {
-		pdecTdoaStart(TDOA_ROLE_MASTER);
+		pdecTdoaStart(TDOA_ROLE_BLINKER);
 	}
 	else if (dede0 == 0xc550) {
 		pdecTdoaStart(TDOA_ROLE_BEACON);
 	}
 	else if (dede0 == 0xdc12) {
-		pdecTdoaStart(TDOA_ROLE_BLINKER);
+		pdecTdoaStart(TDOA_ROLE_MASTER);
 	}
 	
     return 0;
