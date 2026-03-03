@@ -75,7 +75,6 @@ extern const struct gpio_dt_spec led;
 
 
 static void cbRxTo(const dwt_cb_data_t *cb_data) {
-    status = LISTENING;
     dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
     dwt_setrxtimeout(0);
     dwt_rxenable(DWT_START_RX_IMMEDIATE);
@@ -87,20 +86,7 @@ static void cbRxErr(const dwt_cb_data_t *cb_data) {
 
 static void cbTxDone(const dwt_cb_data_t *cb_data) {
     gpio_pin_toggle_dt(&led);
-
-    switch (status)
-    {
-    case IDLE:
-        // doing nothing ? ??
-        break;
-    case POLLING:
-        // should already be in RX
-        break;
-    case LISTENING:
-        dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
-        dwt_rxenable(DWT_START_RX_IMMEDIATE);
-        break;
-    }
+    dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
 }
 
 
@@ -235,7 +221,6 @@ int pdecInit(uint32_t* dev_id) {
 
     dwt_setrxtimeout(0);
     dwt_rxenable(DWT_START_RX_IMMEDIATE);
-    status = LISTENING;
 
 
     return ret;

@@ -12,6 +12,15 @@
 #include <dw3000_hw.h>
 #include <dw3000_spi.h>
 
+
+
+// delay between frame RX, and the delayed TX
+#define POLL_RX_TO_RESP_TX_DLY_UUS 1500
+
+#define RESP_RX_TIMEOUT_UUS 2000
+
+
+
 extern uint8_t frame_seq_nb;
 extern volatile status_t status;
 
@@ -24,11 +33,9 @@ void ranging_init() {
 }
 
 void handle_resp_msg(resp_msg_t* msg, bool double_sided) {
-    if( status != POLLING ||
-        msg->header.dst_id != get_my_id() ||
+    if( msg->header.dst_id != get_my_id() ||
         msg->poll_id != tx_msg.poll.poll_id)
     {
-        status = LISTENING;
         dwt_rxenable(DWT_START_RX_IMMEDIATE);
         return;
     }
@@ -71,9 +78,9 @@ void handle_resp_msg(resp_msg_t* msg, bool double_sided) {
         dwt_writetxfctrl(sizeof(tx_msg.final), 0, 1);          /* Zero offset in TX buffer, ranging. */
 
         dwt_writesysstatuslo(SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR);
-        // dwt_setrxtimeout(0);
-        // status = LISTENING;
-        int ret = dwt_starttx(DWT_START_TX_DELAYED);
+        dwt_setrxtimeout(0);
+
+        int ret = dwt_starttx(DWT_START_TX_DELAYED | DWT_RESPONSE_EXPECTED);
 
         /* If dwt_starttx() returns an error, abandon this ranging exchange and proceed to the next one. See NOTE 10 below. */
         if (ret == DWT_SUCCESS)
@@ -84,6 +91,9 @@ void handle_resp_msg(resp_msg_t* msg, bool double_sided) {
         else {
             printf("failed to send response. ret: %d\n", ret);
         }
+    } else {
+        dwt_setrxtimeout(0);
+        dwt_rxenable(DWT_START_RX_IMMEDIATE);
     }
 
     set_distance(get_my_id(), msg->header.src_id, distance);
@@ -92,19 +102,10 @@ void handle_resp_msg(resp_msg_t* msg, bool double_sided) {
     printf(">[%04x] SS DIST(%04x): %.2f\n", get_my_id(), msg->header.src_id, distance);
 #endif
 
-    dwt_setrxtimeout(0);
-    status = LISTENING;
-
-    if(!double_sided) {
-        dwt_rxenable(DWT_START_RX_IMMEDIATE);
-    }
 }
 
 void handle_poll_msg(poll_msg_t* msg, bool double_sided) {
-    if( status != LISTENING ||
-        (msg->header.dst_id != get_my_id() && msg->header.dst_id != BROADCAST_ID))
-    {
-        status = LISTENING;
+    if( msg->header.dst_id != get_my_id() && msg->header.dst_id != BROADCAST_ID) {
         dwt_rxenable(DWT_START_RX_IMMEDIATE);
         return;
     }
@@ -145,16 +146,13 @@ void handle_poll_msg(poll_msg_t* msg, bool double_sided) {
     
     int ret;
 
+    dwt_setrxaftertxdelay(0);
     if(double_sided) {
-        dwt_setrxaftertxdelay(POLL_TX_TO_RESP_RX_DLY_UUS);
         dwt_setrxtimeout(RESP_RX_TIMEOUT_UUS);
-        status = POLLING;
-        ret = dwt_starttx(DWT_START_TX_DELAYED | DWT_RESPONSE_EXPECTED);
     } else {
         dwt_setrxtimeout(0);
-        status = LISTENING;
-        ret = dwt_starttx(DWT_START_TX_DELAYED);
     }
+    ret = dwt_starttx(DWT_START_TX_DELAYED | DWT_RESPONSE_EXPECTED);
     
     /* If dwt_starttx() returns an error, abandon this ranging exchange and proceed to the next one. See NOTE 10 below. */
     if (ret == DWT_SUCCESS)
@@ -170,7 +168,7 @@ void handle_poll_msg(poll_msg_t* msg, bool double_sided) {
 
 void handle_final_msg(final_msg_t* msg) {
 
-    if(status == POLLING && msg->header.dst_id == get_my_id() && msg->resp_id == tx_msg.resp.resp_id) {
+    if(msg->header.dst_id == get_my_id() && msg->resp_id == tx_msg.resp.resp_id) {
         // final message from a DS ranging directed to us.
         /* Retrieve poll transmission and response reception timestamps. See NOTE 9 below. */
         uint64_t resp_tx_ts = get_tx_timestamp_u64(); //should be the same as msg->resp_tx_ts, maybe more precise.
@@ -191,7 +189,7 @@ void handle_final_msg(final_msg_t* msg) {
         printf(">[%04x] DS DIST(%04x): %.2f\n", get_my_id(), msg->header.src_id, distance);
 #endif
     }
-    else if(status != POLLING) {
+    else {
         double RA = (double)wrap32_diff(msg->resp_rx_ts, msg->poll_tx_ts);
         double rB = (double)wrap32_diff(msg->resp_tx_ts, msg->poll_rx_ts);
 
@@ -204,10 +202,7 @@ void handle_final_msg(final_msg_t* msg) {
         printf(">[%04x] IN DIST(%04x): %.2f\n", msg->header.src_id, msg->header.dst_id, distance);
 #endif
     }
-    else {
-        // we are polling, but the message received is not for us. Fail.
-    }
-    status = LISTENING;
+
     dwt_setrxtimeout(0);
     dwt_rxenable(DWT_START_RX_IMMEDIATE);
 }
@@ -235,9 +230,8 @@ void send_poll(uint16_t dst_id, bool double_sided) {
     dwt_writesysstatuslo(DWT_INT_RX | DWT_INT_TXFRS_BIT_MASK);
 
 
-    dwt_setrxaftertxdelay(POLL_TX_TO_RESP_RX_DLY_UUS);
+    dwt_setrxaftertxdelay(0);
     dwt_setrxtimeout(RESP_RX_TIMEOUT_UUS);
-    status = POLLING;
     dwt_starttx(DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED);
 
     /* Increment frame sequence number after transmission of the poll message (modulo 256). */

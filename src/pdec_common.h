@@ -135,16 +135,6 @@ void send_poll(uint16_t dst_id, bool double_sided);
 
 
 
-// delay between frame RX, and the delayed TX
-#define POLL_RX_TO_RESP_TX_DLY_UUS 1500
-
-// delay before enabling RX after end of TX
-#define POLL_TX_TO_RESP_RX_DLY_UUS 1000
-
-
-#define RESP_RX_TIMEOUT_UUS 1200
-
-
 #define SPEED_OF_LIGHT   (299702547)    //in m/s
 #define FRAME_LEN_MAX    (127)
 #define FRAME_LEN_MAX_EX (1023)
