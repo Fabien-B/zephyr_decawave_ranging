@@ -101,6 +101,10 @@ void send_sync() {
 
 
 void handle_sync_msg(sync_msg_t* msg) {
+    if(tdoa_role == TDOA_ROLE_NONE) {
+        return;
+    }
+
     uint64_t sync_rx_ts = get_rx_timestamp_u64();
 
     ////////////////////////////////////////////////////////////////////
@@ -171,6 +175,10 @@ void handle_sync_msg(sync_msg_t* msg) {
 
 
 void handle_blink_msg(blink_msg_t* msg) {
+    if(tdoa_role == TDOA_ROLE_NONE) {
+        return;
+    }
+
     bool plop = false;
     int64_t blink_rx_ts = get_rx_timestamp_u64();
     
@@ -242,6 +250,9 @@ void handle_blink_msg(blink_msg_t* msg) {
 }
 
 void handle_blink_report_msg(blink_report_msg_t* msg) {
+    if(tdoa_role == TDOA_ROLE_NONE) {
+        return;
+    }
 
     // only the master process blik reports
     if(tdoa_role == TDOA_ROLE_MASTER) {

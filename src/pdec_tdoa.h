@@ -3,6 +3,7 @@
 #include "pdec_common.h"
 
 typedef enum {
+    TDOA_ROLE_NONE,
     TDOA_ROLE_BLINKER,
     TDOA_ROLE_MASTER,
     TDOA_ROLE_BEACON,

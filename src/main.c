@@ -27,6 +27,20 @@
 const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
 
 
+typedef struct {
+    uint16_t dev_id;
+    tdoa_role_t role;
+} role_record_t;
+
+// TDOA_ROLE_MASTER, TDOA_ROLE_BEACON, TDOA_ROLE_BLINKER
+role_record_t roles[] = {
+	{.dev_id = 0xc550, .role = TDOA_ROLE_MASTER},
+	{.dev_id = 0x0839, .role = TDOA_ROLE_BEACON},
+	{.dev_id = 0xdc12, .role = TDOA_ROLE_BEACON},
+    {.dev_id = 0xcfdc, .role = TDOA_ROLE_BEACON},
+    {.dev_id = 0x842c, .role = TDOA_ROLE_BLINKER},
+	{0, 0}
+};
 
 #define BLINKER_STACK_SIZE 500
 #define BLINKER_PRIORITY 5
@@ -58,31 +72,27 @@ K_THREAD_DEFINE(blinker_tid, BLINKER_STACK_SIZE,
 
 int main(void)
 {
-	uint32_t dev_id;
-	pdecInit(&dev_id);
-    
-	uint32_t dede0 = get_my_id();
-
-	printf("dede: %x\n", dede0);
-
-	const char* api_version = dwt_version_string();
-	printf("DWT API version: %s\n", api_version);
-
+	pdecInit(NULL);
+	// k_msleep(100);
 	
+	printf("device ID: %x\n", get_my_id());
 
 	//pdecInitiatorStart();
 
-	k_msleep(100);
+	for(int i=0; roles[i].dev_id != 0; i++) {
+		if(roles[i].dev_id == get_my_id()) {
+			pdecTdoaStart(roles[i].role);
+		}
+	}
 
-	if(dede0 == 0x0839) {
-		pdecTdoaStart(TDOA_ROLE_BLINKER);
+
+	int ret = testBLE();
+	while (true)
+	{
+		k_msleep(1000);
+		print_ble_addr();
 	}
-	else if (dede0 == 0xc550) {
-		pdecTdoaStart(TDOA_ROLE_BEACON);
-	}
-	else if (dede0 == 0xdc12) {
-		pdecTdoaStart(TDOA_ROLE_MASTER);
-	}
+	
 	
     return 0;
 }

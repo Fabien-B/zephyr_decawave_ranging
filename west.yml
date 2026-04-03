@@ -15,6 +15,7 @@ manifest:
         name-allowlist:
           - hal_nordic
           - cmsis_6
+          - nrfxlib
 
     - name: zephyr-dw3000-decadriver
       path: deps/zephyr-dw3000-decadriver

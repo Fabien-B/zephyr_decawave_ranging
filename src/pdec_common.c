@@ -124,27 +124,35 @@ static void cbRxOk(const dwt_cb_data_t *cb_data) {
     {
     case DF_SS_RANGING_POLL:
         handle_poll_msg((poll_msg_t*)header, false);
+        printf("SS POLL\n");
         break;
     case DF_DS_RANGING_POLL:
         handle_poll_msg((poll_msg_t*)header, true);
+        printf("DS POLL\n");
         break;
     case DF_SS_RANGING_RESP:
         handle_resp_msg((resp_msg_t*)header, false);
+        printf("SS RESP\n");
         break;
     case DF_DS_RANGING_RESP:
         handle_resp_msg((resp_msg_t*)header, true);
+        printf("DS RESP\n");
         break;
     case DF_DS_RANGING_FINAL:
         handle_final_msg((final_msg_t*)header);
+        printf("DS FINAL\n");
         break;
     case DF_TDOA_SYNC:
         handle_sync_msg((sync_msg_t*)header);
+        printf("SYNC\n");
         break;
     case DF_TDOA_BLINK:
         handle_blink_msg((blink_msg_t*)header);
+        printf("BLINK\n");
         break;
     case DF_TDOA_BLINK_REPORT:
         handle_blink_report_msg((blink_report_msg_t*)header);
+        printf("BLINK REPORT\n");
         break;
     default:
         printf("Unknown frame role: %d\n", header->frame_role);
@@ -167,13 +175,14 @@ int pdecInit(uint32_t* dev_id) {
 
     uint32_t id = dwt_readdevid();
 	int ret = dwt_check_dev_id();
-    if(ret == DWT_SUCCESS) {
-		printf("Good device ID: %x\n", id);
-	} else {
+    if(ret != DWT_SUCCESS) {
 		printf("Bad device ID: %x\n", id);
         return ret;
 	}
-    *dev_id = id;
+    
+    if(dev_id != NULL) {
+        *dev_id = id;
+    }
 
     // Wait for DW IC to be in IDLE_RC
     while (!dwt_checkidlerc())  {

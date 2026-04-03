@@ -7,6 +7,8 @@ uint16_t devices[] = {
 	0xc550,
 	0x0839,
 	0xdc12,
+    0xcfdc,
+    0x842c,
     0 // Must end with 0 to detect the end of the array
 };
 
