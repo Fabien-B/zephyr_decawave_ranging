@@ -17,30 +17,27 @@
 #include "pdec_initiator.h"
 #include "pdec_tdoa.h"
 
+#include "ble.h"
+
 /* 1000 msec = 1 sec */
 #define SLEEP_TIME_MS   800
 
 /* The devicetree node identifier for the "led0" alias. */
 #define LED0_NODE DT_ALIAS(led0)
-
-
 const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
 
+#define JP1_NODE DT_ALIAS(sw1)
+const struct gpio_dt_spec jp1 = GPIO_DT_SPEC_GET(JP1_NODE, gpios);
 
-typedef struct {
-    uint16_t dev_id;
-    tdoa_role_t role;
-} role_record_t;
+#define JP2_NODE DT_ALIAS(sw2)
+const struct gpio_dt_spec jp2 = GPIO_DT_SPEC_GET(JP2_NODE, gpios);
 
-// TDOA_ROLE_MASTER, TDOA_ROLE_BEACON, TDOA_ROLE_BLINKER
-role_record_t roles[] = {
-	{.dev_id = 0xc550, .role = TDOA_ROLE_MASTER},
-	{.dev_id = 0x0839, .role = TDOA_ROLE_BEACON},
-	{.dev_id = 0xdc12, .role = TDOA_ROLE_BEACON},
-    {.dev_id = 0xcfdc, .role = TDOA_ROLE_BEACON},
-    {.dev_id = 0x842c, .role = TDOA_ROLE_BLINKER},
-	{0, 0}
-};
+#define JP3_NODE DT_ALIAS(sw3)
+const struct gpio_dt_spec jp3 = GPIO_DT_SPEC_GET(JP3_NODE, gpios);
+
+#define JP4_NODE DT_ALIAS(sw4)
+const struct gpio_dt_spec jp4 = GPIO_DT_SPEC_GET(JP4_NODE, gpios);
+
 
 #define BLINKER_STACK_SIZE 500
 #define BLINKER_PRIORITY 5
@@ -56,11 +53,12 @@ extern void blinker(void *, void *, void *) {
 	}
 
 	while (1) {
-		// int ret = gpio_pin_toggle_dt(&led);
+		gpio_pin_toggle_dt(&led);
 		// if (ret < 0) {
 		// 	return;
 		// }
-		k_msleep(SLEEP_TIME_MS);
+		uint32_t period = ble_get_blink_period_ms();
+		k_msleep(period);
 	}
 }
 
@@ -77,21 +75,29 @@ int main(void)
 	
 	printf("device ID: %x\n", get_my_id());
 
+	gpio_pin_configure_dt(&jp1, GPIO_INPUT);
+	gpio_pin_configure_dt(&jp2, GPIO_INPUT);
+	gpio_pin_configure_dt(&jp3, GPIO_INPUT);
+	gpio_pin_configure_dt(&jp4, GPIO_INPUT);
+
+
+	int j1 = gpio_pin_get_dt(&jp1);
+	int j2 = gpio_pin_get_dt(&jp2);
+	// int j3 = gpio_pin_get_dt(&jp3);
+	// int j4 = gpio_pin_get_dt(&jp4);
+
+	printf("j1: %d,  j2: %d\n", j1, j2);
+
+	tdoa_role_t role = (tdoa_role_t) (j2 << 1) | (j1 << 0);
+	printf("Starts TDOA role: %d\n", role);
+
 	//pdecInitiatorStart();
 
-	for(int i=0; roles[i].dev_id != 0; i++) {
-		if(roles[i].dev_id == get_my_id()) {
-			pdecTdoaStart(roles[i].role);
-		}
-	}
+	pdecTdoaStart(role);
 
 
-	int ret = testBLE();
-	while (true)
-	{
-		k_msleep(1000);
-		print_ble_addr();
-	}
+	ble_init();
+
 	
 	
     return 0;

@@ -32,23 +32,8 @@
 		// D20: something related to jlink, red
 		// D13: DW3000 tx(red)/rx(green)
 		led0: led_0 {
-			gpios = <&gpio0 04 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio0 28 GPIO_ACTIVE_LOW>;
 			label = "D9 green LED";
-		};
-
-		led1: led_1 {
-			gpios = <&gpio0 14 GPIO_ACTIVE_LOW>;
-			label = "D12 red LED";
-		};
-
-		led2: led_2 {
-			gpios = <&gpio0 22 GPIO_ACTIVE_LOW>;
-			label = "D11 red LED";
-		};
-
-		led3: led_3 {
-			gpios = <&gpio0 05 GPIO_ACTIVE_LOW>;
-			label = "D10 blue LED";
 		};
 	};
 
@@ -57,20 +42,35 @@
 
 		// SW1 is connected to P0.18, which by default is nRESET and
 		// will reset the board
-		button2: button_2 {
-			gpios = <&gpio0 2 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-			label = "Push button switch 2";
+		jp1: jp_1 {
+			gpios = <&gpio0 17 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "JP1";
 			zephyr,code = <INPUT_KEY_1>;
+		};
+		jp2: jp_2 {
+			gpios = <&gpio0 14 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "JP2";
+			zephyr,code = <INPUT_KEY_2>;
+		};
+		jp3: jp_3 {
+			gpios = <&gpio0 22 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "JP3";
+			zephyr,code = <INPUT_KEY_3>;
+		};
+		jp4: jp_4 {
+			gpios = <&gpio0 5 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "JP4";
+			zephyr,code = <INPUT_KEY_4>;
 		};
 	};
 
 	/* These aliases are provided for compatibility with samples */
 	aliases {
-		sw0 = &button2;
+		sw1 = &jp1;
+		sw2 = &jp2;
+		sw3 = &jp3;
+		sw4 = &jp4;
 		led0 = &led0;
-		led1 = &led1;
-		led2 = &led2;
-		led3 = &led3;
 		watchdog0 = &wdt0;
 		accel0 = &lis2dh12;
 	};

@@ -85,7 +85,6 @@ static void cbRxErr(const dwt_cb_data_t *cb_data) {
 }
 
 static void cbTxDone(const dwt_cb_data_t *cb_data) {
-    gpio_pin_toggle_dt(&led);
     dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
 }
 
@@ -95,7 +94,6 @@ static void cbTxDone(const dwt_cb_data_t *cb_data) {
 
 
 static void cbRxOk(const dwt_cb_data_t *cb_data) {
-    gpio_pin_toggle_dt(&led);
     uint8_t rng;
     
     dwt_writesysstatuslo(DWT_INT_RXFCG_BIT_MASK);
@@ -152,11 +150,31 @@ static void cbRxOk(const dwt_cb_data_t *cb_data) {
         break;
     case DF_TDOA_BLINK_REPORT:
         handle_blink_report_msg((blink_report_msg_t*)header);
-        printf("BLINK REPORT\n");
+        //printf("BLINK REPORT\n");
         break;
     default:
         printf("Unknown frame role: %d\n", header->frame_role);
     }
+}
+
+void send_data_msg(uint8_t* buffer, uint8_t len) {
+    com_msg_t msg;
+    if(len > PAYLOAD_FRAME_LEN_MAX) {
+        return;
+    }
+    msg.len = len;
+    memcpy(msg.payload, buffer, len);
+
+    dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
+    dwt_writetxdata(COM_MSG_SIZE(len), (uint8_t*)&msg, 0); /* Zero offset in TX buffer. */
+    dwt_writetxfctrl(COM_MSG_SIZE(len), 0, 0);          /* Zero offset in TX buffer, no ranging. */
+    
+    // interrompt le RX permanent
+    dwt_forcetrxoff();
+    dwt_writesysstatuslo(DWT_INT_RX | DWT_INT_TXFRS_BIT_MASK);
+
+    dwt_setrxaftertxdelay(0);
+    dwt_starttx(DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED);
 }
 
 int pdecInit(uint32_t* dev_id) {

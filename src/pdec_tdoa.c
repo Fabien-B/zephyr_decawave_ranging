@@ -1,6 +1,7 @@
 #include"pdec_common.h"
 #include "pdec_database.h"
 #include "pdec_tdoa.h"
+#include "pdec_ranging.h"
 
 #include <stdio.h>
 #include <zephyr/kernel.h>
@@ -36,6 +37,8 @@ static uint64_t last_sync_rx_ts = 0;    // in my clock
 static uint64_t last_sync_tx_ts = 0;    // in master clock
 
 uint16_t blink_seq_nb = 0;
+
+uint32_t last_blink_id = 0;
 
 
 double alpha = 1;
@@ -118,8 +121,6 @@ void handle_sync_msg(sync_msg_t* msg) {
         double distance = get_distance(get_my_id(), msg->header.src_id);
         uint64_t dt = distance / (SPEED_OF_LIGHT*DWT_TIME_UNITS);
         beta = timestamp_diff(sync_rx_ts, (uint64_t)(alpha*msg->sync_ts) + dt);
-        double beta_s = beta * DWT_TIME_UNITS;
-        //printf("Sync: alpha=%f,  beta=%f\n", alpha, beta_s);
     }
     last_sync_rx_ts = sync_rx_ts;
     last_sync_tx_ts = msg->sync_ts;
@@ -179,13 +180,16 @@ void handle_blink_msg(blink_msg_t* msg) {
         return;
     }
 
+    last_blink_id = msg->blink_id;
+
     bool plop = false;
     int64_t blink_rx_ts = get_rx_timestamp_u64();
     
     if(tdoa_role == TDOA_ROLE_MASTER) {
         // the master does not need to report
         _master_blink_rx_ts = blink_rx_ts;
-        printf(">MBlink: %lld\n", blink_rx_ts);
+        //printf(">MBlink: %lld\n", blink_rx_ts);
+        printf("\n");
         dwt_setrxtimeout(0);
         status = POLLING;
         dwt_rxenable(DWT_START_RX_IMMEDIATE);
@@ -256,15 +260,11 @@ void handle_blink_report_msg(blink_report_msg_t* msg) {
 
     // only the master process blik reports
     if(tdoa_role == TDOA_ROLE_MASTER) {
-        static uint32_t blink_id = 0;
-        int64_t dt = timestamp_diff_signed(_master_blink_rx_ts, msg->blink_rx_ts) ;
-        double distance = dt * DWT_TIME_UNITS * SPEED_OF_LIGHT;
-        //printf("dt: %llu - %llu = %lld -> %.2f\n", msg->blink_rx_ts, _master_blink_rx_ts, dt, distance);
-        printf("dt: %03lld -> %.2f\n", dt, distance);
-        if(msg->blink_id != blink_id) {
-            printf("\n\n");
+        if(msg->blink_id == last_blink_id) {
+            int64_t dt = timestamp_diff_signed(_master_blink_rx_ts, msg->blink_rx_ts) ;
+            double distance = dt * DWT_TIME_UNITS * SPEED_OF_LIGHT;
+            printf("[%X] %.2f\n", msg->header.src_id, distance);
         }
-        blink_id = msg->blink_id;
     }
 
 
@@ -295,10 +295,8 @@ static void pdec_sync_task(void *, void *, void *) {
     while(true) {
         for(int i=0;i<10; i++) {
              send_sync();
-             k_msleep(200);
+             k_msleep(1000);
         }
-        send_poll(0xc550, true);
-        k_msleep(200);
     }
 }
 

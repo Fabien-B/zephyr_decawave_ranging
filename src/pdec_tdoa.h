@@ -4,9 +4,9 @@
 
 typedef enum {
     TDOA_ROLE_NONE,
+    TDOA_ROLE_BEACON,
     TDOA_ROLE_BLINKER,
     TDOA_ROLE_MASTER,
-    TDOA_ROLE_BEACON,
 } tdoa_role_t;
 
 void send_sync();

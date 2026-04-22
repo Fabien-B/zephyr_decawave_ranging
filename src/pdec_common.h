@@ -6,6 +6,8 @@
 #define MY_PAN_ID 0xDEAD
 #define BROADCAST_ID 0xFFFE
 
+#define PAYLOAD_FRAME_LEN_MAX 113
+
 
 typedef struct __attribute__((packed)) {
     uint16_t frame_control;
@@ -67,6 +69,16 @@ typedef struct __attribute__((packed)) {
     uint16_t chk;   // checksum automatically set by DW IC
 } blink_report_msg_t;
 
+#define COM_MSG_SIZE(len) (len + sizeof(frame_header_t) + 1 + 3)
+
+typedef struct __attribute__((packed)) {
+    frame_header_t header;
+    // lenght of payload. Don't forget the checksum !
+    uint8_t len;
+    // 2 extra bytes for the checksum, automatically set by DW IC
+    uint8_t payload[PAYLOAD_FRAME_LEN_MAX+2];
+} com_msg_t;
+
 union ranging_msg_u
 {
     frame_header_t header;
@@ -77,6 +89,8 @@ union ranging_msg_u
     sync_msg_t sync;
     blink_msg_t blink;
     blink_report_msg_t blink_report;
+
+    com_msg_t com;
 };
 
 
@@ -111,11 +125,8 @@ int64_t timestamp_diff_signed(uint64_t a, uint64_t b);
 
 uint16_t get_my_id();
 
-void send_sync();
 
-
-void send_poll(uint16_t dst_id, bool double_sided);
-
+void send_data_msg(uint8_t* buffer, uint8_t len);
 
 // frame control:
 // 2:0    001  data
