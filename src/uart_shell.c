@@ -136,14 +136,14 @@ static int cmd_ranging_range(const struct shell *sh, size_t argc, char **argv)
 {
     if(argc < 2) {
         shell_print(sh, "Usage: >ranging range 0x9e7a");
-        return -EDESTADDRREQ;
+        return -EINVAL;
     }
 
     int err = 0;
     uint16_t dst = shell_strtoul(argv[1], 0, &err);
 
     if(err) {
-        shell_print(sh, "Error: %d", err);
+        shell_print(sh, "Invalid ID: %s", argv[1]);
         return err;
     }
 
@@ -170,9 +170,48 @@ static int cmd_ranging_monitor(const struct shell *sh, size_t argc, char **argv)
     return 0;
 }
 
+static int cmd_ranging_list(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    shell_print(sh, "Known devices:");
+    for (int i = 0; get_device_id(i) != 0; i++) {
+        uint16_t id = get_device_id(i);
+        shell_print(sh, " [%d] 0x%04x %s", i, id, (id == get_my_id()) ? "(me)" : "");
+    }
+    return 0;
+}
+
+static int cmd_ranging_get(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_print(sh, "Usage: ranging get <id>");
+        return -EINVAL;
+    }
+
+    int err = 0;
+    uint16_t dst = (uint16_t)shell_strtoul(argv[1], 0, &err);
+    if (err) {
+        shell_print(sh, "Invalid ID: %s", argv[1]);
+        return err;
+    }
+
+    double dist = get_distance(get_my_id(), dst);
+    if (dist < 0) {
+        shell_print(sh, "No distance known for 0x%04x", dst);
+    } else {
+        shell_print(sh, "Last distance to 0x%04x: %.02fm", dst, dist);
+    }
+
+    return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_ranging,
     SHELL_CMD(range, NULL, "Perform ranging with target.", cmd_ranging_range),
+    SHELL_CMD(get, NULL, "Get last known distance to a device.", cmd_ranging_get),
     SHELL_CMD(monitor, NULL, "Monitor ranges", cmd_ranging_monitor),
+    SHELL_CMD(list, NULL, "List all devices in database", cmd_ranging_list),
     SHELL_SUBCMD_SET_END
 );
 
