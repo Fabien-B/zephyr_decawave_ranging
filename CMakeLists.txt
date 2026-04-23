@@ -5,12 +5,15 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(test_dwm3001c)
 
 target_sources(app PRIVATE
+    src/app_print.c
     src/main.c
     src/pdec_common.c
     src/pdec_initiator.c
     src/pdec_database.c
     src/pdec_ranging.c
     src/pdec_tdoa.c
+    src/uart_protocol.c
+    src/uart_shell.c
 
     src/ble.c
 )

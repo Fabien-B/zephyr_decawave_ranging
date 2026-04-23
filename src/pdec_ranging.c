@@ -12,6 +12,8 @@
 #include <dw3000_hw.h>
 #include <dw3000_spi.h>
 
+#include "app_print.h"
+
 
 
 // delay between frame RX, and the delayed TX
@@ -237,4 +239,3 @@ void send_poll(uint16_t dst_id, bool double_sided) {
     /* Increment frame sequence number after transmission of the poll message (modulo 256). */
     frame_seq_nb++;
 }
-

@@ -14,6 +14,8 @@
 #include <dw3000_hw.h>
 #include <dw3000_spi.h>
 
+#include "app_print.h"
+
 #define SYNC_DELAY 2000  //us
 #define SYNC_SLOT_TIME 5000  //us
 
@@ -313,4 +315,3 @@ void pdecTdoaStart(tdoa_role_t role) {
     }
 
 }
-

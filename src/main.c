@@ -18,6 +18,8 @@
 #include "pdec_tdoa.h"
 
 #include "ble.h"
+#include "app_print.h"
+#include "uart_protocol.h"
 
 /* 1000 msec = 1 sec */
 #define SLEEP_TIME_MS   800
@@ -71,6 +73,7 @@ K_THREAD_DEFINE(blinker_tid, BLINKER_STACK_SIZE,
 int main(void)
 {
 	pdecInit(NULL);
+	pdec_uart_protocol_init();
 	// k_msleep(100);
 	
 	printf("device ID: %x\n", get_my_id());

@@ -26,6 +26,8 @@
 
 #include <string.h>
 
+#include "app_print.h"
+
 LOG_MODULE_REGISTER(ble, LOG_LEVEL_INF);
 
 /* -------------------------------------------------------------------------
@@ -83,7 +85,7 @@ static ssize_t read_blink_period(struct bt_conn *conn,
     val = blink_period_ms;
     k_mutex_unlock(&blink_mutex);
 
-	printk("read blink period: %u\n", val);
+	pdec_printf("read blink period: %u\n", val);
 
     return bt_gatt_attr_read(conn, attr, buf, len, offset,
                              &val, sizeof(val));
