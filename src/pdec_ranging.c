@@ -1,5 +1,6 @@
 #include"pdec_common.h"
 #include "pdec_database.h"
+#include "pdec_ranging.h"
 
 #include <stdio.h>
 #include <zephyr/kernel.h>
