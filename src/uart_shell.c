@@ -162,10 +162,20 @@ static int cmd_ranging_range(const struct shell *sh, size_t argc, char **argv)
 
 static int cmd_ranging_monitor(const struct shell *sh, size_t argc, char **argv)
 {
-    ARG_UNUSED(argc);
-    ARG_UNUSED(argv);
-    
-    start_monitor(sh);
+    enum ranging_monitor_scope scope = RANGING_MONITOR_SCOPE_LOCAL;
+
+    if (argc >= 2) {
+        if (strcmp(argv[1], "local") == 0) {
+            scope = RANGING_MONITOR_SCOPE_LOCAL;
+        } else if (strcmp(argv[1], "all") == 0) {
+            scope = RANGING_MONITOR_SCOPE_ALL;
+        } else {
+            shell_print(sh, "Usage: ranging monitor [local|all]");
+            return -EINVAL;
+        }
+    }
+
+    start_monitor(sh, scope);
     
     return 0;
 }

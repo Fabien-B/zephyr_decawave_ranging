@@ -19,10 +19,28 @@
 static volatile bool monitor_stop_requested;
 #define MONITOR_STACK_SIZE 1024
 #define PRIORITY 5
+#define MONITOR_QUEUE_LEN 8
 static K_THREAD_STACK_DEFINE(monitor_stack, MONITOR_STACK_SIZE);
 static struct k_thread monitor_thread;
+static bool monitor_running;
+static enum ranging_monitor_scope monitor_scope = RANGING_MONITOR_SCOPE_LOCAL;
 #define ASCII_CTRL_C 0x03
 
+enum ranging_event_kind {
+    RANGING_EVENT_KIND_SS = 0,
+    RANGING_EVENT_KIND_DS,
+    RANGING_EVENT_KIND_IN,
+    RANGING_EVENT_KIND_STOP,
+};
+
+struct ranging_event {
+    uint16_t src_id;
+    uint16_t dst_id;
+    double distance;
+    enum ranging_event_kind kind;
+};
+
+K_MSGQ_DEFINE(monitor_queue, sizeof(struct ranging_event), MONITOR_QUEUE_LEN, 8);
 
 
 // delay between frame RX, and the delayed TX
@@ -36,6 +54,57 @@ extern uint8_t frame_seq_nb;
 extern volatile status_t status;
 
 static union ranging_msg_u tx_msg;
+
+static const char *ranging_event_kind_label(enum ranging_event_kind kind)
+{
+    switch (kind) {
+    case RANGING_EVENT_KIND_SS:
+        return "SS";
+    case RANGING_EVENT_KIND_DS:
+        return "DS";
+    case RANGING_EVENT_KIND_IN:
+        return "IN";
+    case RANGING_EVENT_KIND_STOP:
+    default:
+        return "STOP";
+    }
+}
+
+static bool should_print_event(const struct ranging_event *event)
+{
+    if (monitor_scope == RANGING_MONITOR_SCOPE_ALL) {
+        return true;
+    }
+
+    uint16_t my_id = get_my_id();
+
+    return event->src_id == my_id || event->dst_id == my_id;
+}
+
+static void publish_ranging_event(uint16_t src_id, uint16_t dst_id, double distance,
+                                  enum ranging_event_kind kind)
+{
+    struct ranging_event event = {
+        .src_id = src_id,
+        .dst_id = dst_id,
+        .distance = distance,
+        .kind = kind,
+    };
+
+    (void)k_msgq_put(&monitor_queue, &event, K_NO_WAIT);
+}
+
+static void enqueue_stop_event(void)
+{
+    struct ranging_event event = {
+        .kind = RANGING_EVENT_KIND_STOP,
+    };
+
+    if (k_msgq_put(&monitor_queue, &event, K_NO_WAIT) != 0) {
+        k_msgq_purge(&monitor_queue);
+        (void)k_msgq_put(&monitor_queue, &event, K_NO_WAIT);
+    }
+}
 
 void ranging_init() {
     tx_msg.header.frame_control = FRAME_CONTROL;
@@ -108,6 +177,7 @@ void handle_resp_msg(resp_msg_t* msg, bool double_sided) {
     }
 
     set_distance(get_my_id(), msg->header.src_id, distance);
+    publish_ranging_event(get_my_id(), msg->header.src_id, distance, RANGING_EVENT_KIND_SS);
 
 #if CONFIG_PDEC_PRINT_RANGING
     printf(">[%04x] SS DIST(%04x): %.2f\n", get_my_id(), msg->header.src_id, distance);
@@ -196,6 +266,7 @@ void handle_final_msg(final_msg_t* msg) {
         double distance = tof * SPEED_OF_LIGHT;
 
         set_distance(get_my_id(), msg->header.src_id, distance);
+        publish_ranging_event(get_my_id(), msg->header.src_id, distance, RANGING_EVENT_KIND_DS);
 #if CONFIG_PDEC_PRINT_RANGING
         printf(">[%04x] DS DIST(%04x): %.2f\n", get_my_id(), msg->header.src_id, distance);
 #endif
@@ -208,6 +279,7 @@ void handle_final_msg(final_msg_t* msg) {
         double distance = tof * SPEED_OF_LIGHT;
 
         set_distance(msg->header.src_id, msg->header.dst_id, distance);
+        publish_ranging_event(msg->header.src_id, msg->header.dst_id, distance, RANGING_EVENT_KIND_IN);
 
 #if CONFIG_PDEC_PRINT_RANGING
         printf(">[%04x] IN DIST(%04x): %.2f\n", msg->header.src_id, msg->header.dst_id, distance);
@@ -257,7 +329,6 @@ static void monitor_bypass(const struct shell *sh, uint8_t *data, size_t len)
 	for (size_t i = 0; i < len; i++) {
 		if (data[i] == ASCII_CTRL_C) {
 			stop_monitor();
-            shell_set_bypass(sh, NULL);
 		}
 	}
 }
@@ -265,29 +336,56 @@ static void monitor_bypass(const struct shell *sh, uint8_t *data, size_t len)
 static void monitor(void *p1, void *p2, void *p3)
 {
     const struct shell *shell = p1;
+    struct ranging_event event;
 
     shell_set_bypass(shell, monitor_bypass);
 
-    while (!monitor_stop_requested) {
-        // TODO print new rangings
-        shell_print(shell, "Running...");
-        k_msleep(500);
+    while (true) {
+        if (k_msgq_get(&monitor_queue, &event, K_FOREVER) != 0) {
+            continue;
+        }
+
+        if (event.kind == RANGING_EVENT_KIND_STOP && monitor_stop_requested) {
+            break;
+        }
+
+        if (event.kind == RANGING_EVENT_KIND_STOP || !should_print_event(&event)) {
+            continue;
+        }
+
+        shell_print(shell, "[%s] 0x%04x <-> 0x%04x: %.02fm",
+                    ranging_event_kind_label(event.kind),
+                    event.src_id, event.dst_id, event.distance);
     }
 
+    shell_set_bypass(shell, NULL);
+    monitor_running = false;
     shell_print(shell, "Stopped");
 }
 
-void start_monitor(struct shell *shell) {
+void start_monitor(const struct shell *shell, enum ranging_monitor_scope scope) {
+    if (monitor_running) {
+        shell_print(shell, "Monitor already running");
+        return;
+    }
+
     monitor_stop_requested = false;
+    monitor_scope = scope;
+    monitor_running = true;
+    k_msgq_purge(&monitor_queue);
 
     k_thread_create(&monitor_thread, monitor_stack, MONITOR_STACK_SIZE,
                     monitor, (void *)shell, NULL, NULL,
-                    5, 0, K_NO_WAIT);
+                    PRIORITY, 0, K_NO_WAIT);
 
     return;
 }
 
 void stop_monitor() {
-    monitor_stop_requested = true;
-}
+    if (!monitor_running) {
+        return;
+    }
 
+    monitor_stop_requested = true;
+    enqueue_stop_event();
+}
