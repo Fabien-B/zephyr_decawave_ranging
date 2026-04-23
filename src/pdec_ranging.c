@@ -6,6 +6,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/types.h>
 #include <zephyr/random/random.h>
+#include <zephyr/shell/shell.h>
 
 #include <deca_device_api.h>
 #include <deca_probe_interface.h>
@@ -13,6 +14,13 @@
 #include <dw3000_spi.h>
 
 #include "app_print.h"
+
+static volatile bool monitor_stop_requested;
+#define MONITOR_STACK_SIZE 1024
+#define PRIORITY 5
+static K_THREAD_STACK_DEFINE(monitor_stack, MONITOR_STACK_SIZE);
+static struct k_thread monitor_thread;
+#define ASCII_CTRL_C 0x03
 
 
 
@@ -239,3 +247,46 @@ void send_poll(uint16_t dst_id, bool double_sided) {
     /* Increment frame sequence number after transmission of the poll message (modulo 256). */
     frame_seq_nb++;
 }
+
+
+static void monitor_bypass(const struct shell *sh, uint8_t *data, size_t len)
+{
+	ARG_UNUSED(sh);
+
+	for (size_t i = 0; i < len; i++) {
+		if (data[i] == ASCII_CTRL_C) {
+			stop_monitor();
+            shell_set_bypass(sh, NULL);
+		}
+	}
+}
+
+static void monitor(void *p1, void *p2, void *p3)
+{
+    const struct shell *shell = p1;
+
+    shell_set_bypass(shell, monitor_bypass);
+
+    while (!monitor_stop_requested) {
+        // TODO print new rangings
+        shell_print(shell, "Running...");
+        k_msleep(500);
+    }
+
+    shell_print(shell, "Stopped");
+}
+
+void start_monitor(struct shell *shell) {
+    monitor_stop_requested = false;
+
+    k_thread_create(&monitor_thread, monitor_stack, MONITOR_STACK_SIZE,
+                    monitor, (void *)shell, NULL, NULL,
+                    5, 0, K_NO_WAIT);
+
+    return;
+}
+
+void stop_monitor() {
+    monitor_stop_requested = true;
+}
+

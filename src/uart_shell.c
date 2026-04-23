@@ -8,6 +8,8 @@
 #include <zephyr/sys/ring_buffer.h>
 
 #include "uart_protocol.h"
+#include "pdec_ranging.h"
+#include "pdec_database.h"
 
 #define PDEC_SHELL_RX_RING_SIZE 256
 
@@ -126,6 +128,58 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_uart,
 );
 
 SHELL_CMD_REGISTER(uart, &sub_uart, "UART protocol commands.", NULL);
+
+
+
+
+static int cmd_ranging_range(const struct shell *sh, size_t argc, char **argv)
+{
+    if(argc < 2) {
+        shell_print(sh, "Usage: >ranging range 0x9e7a");
+        return -EDESTADDRREQ;
+    }
+
+    int err = 0;
+    uint16_t dst = shell_strtoul(argv[1], 0, &err);
+
+    if(err) {
+        shell_print(sh, "Error: %d", err);
+        return err;
+    }
+
+    double old_distance = get_distance(get_my_id(), dst);
+    send_poll(dst, true);
+    k_msleep(20);
+    double new_distance = get_distance(get_my_id(), dst);
+    if(new_distance == old_distance) {
+        shell_print(sh, "Ranging with 0x%04x failed !", dst);
+    } else {
+        shell_print(sh, "0x%04x: %.02fm", dst, new_distance);
+    }
+    
+    return 0;
+}
+
+static int cmd_ranging_monitor(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+    
+    start_monitor(sh);
+    
+    return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_ranging,
+    SHELL_CMD(range, NULL, "Perform ranging with target.", cmd_ranging_range),
+    SHELL_CMD(monitor, NULL, "Monitor ranges", cmd_ranging_monitor),
+    SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(ranging, &sub_ranging, "UART protocol commands.", NULL);
+
+
+
 
 int pdec_uart_shell_init(void)
 {
