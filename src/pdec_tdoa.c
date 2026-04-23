@@ -279,9 +279,10 @@ void handle_blink_report_msg(blink_report_msg_t* msg) {
 static void pdec_sync_task(void *, void *, void *) {
     // do a few ranging before static TDOA
     for(int i=0; i<10; i++) {
-        for(int i=0; devices[i] != 0; i++) {
-            if(devices[i] != get_my_id()) {
-                send_poll(devices[i], true);
+        for(int j=0; get_device_id(j) != 0; j++) {
+            uint16_t dev_id = get_device_id(j);
+            if(dev_id != get_my_id()) {
+                send_poll(dev_id, true);
                 k_msleep(100);
             }
         }

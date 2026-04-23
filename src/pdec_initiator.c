@@ -1,6 +1,7 @@
 #include "pdec_initiator.h"
 #include "pdec_common.h"
 #include "pdec_database.h"
+#include "pdec_ranging.h"
 
 #include <stdio.h>
 #include <zephyr/kernel.h>
@@ -27,9 +28,10 @@ struct k_thread initiator_thread_data;
 
 static void pdec_initiator(void *, void *, void *) {
     while(true) {
-        for(int i=0; devices[i] != 0; i++) {
-            if(devices[i] != get_my_id()) {
-                send_poll(devices[i], true);
+        for(int i=0; get_device_id(i) != 0; i++) {
+            uint16_t dev_id = get_device_id(i);
+            if(dev_id != get_my_id()) {
+                send_poll(dev_id, true);
                 k_msleep(RNG_DELAY_MS - sys_rand8_get());
             }
         }
@@ -43,4 +45,3 @@ void pdecInitiatorStart() {
                                      NULL, NULL, NULL,
                                      INITIATOR_PRIORITY, 0, K_NO_WAIT);
 }
-
