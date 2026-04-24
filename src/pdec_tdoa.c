@@ -97,9 +97,6 @@ void send_sync() {
         // Increment frame sequence number after transmission of the poll message (modulo 256).
         frame_seq_nb++;
     }
-    else {
-        printf("failed to send SYNC. ret: %d\n", ret);
-    }
 
 }
 
@@ -166,10 +163,6 @@ void handle_sync_msg(sync_msg_t* msg) {
             // Increment frame sequence number after transmission of the poll message (modulo 256).
             frame_seq_nb++;
             blink_seq_nb++;
-            printf(">BlinkTX:%llu\n", blink_tx_time);
-        }
-        else {
-            printf("failed to send SYNC. ret: %d\n", ret);
         }
     }
 
@@ -190,8 +183,6 @@ void handle_blink_msg(blink_msg_t* msg) {
     if(tdoa_role == TDOA_ROLE_MASTER) {
         // the master does not need to report
         _master_blink_rx_ts = blink_rx_ts;
-        //printf(">MBlink: %lld\n", blink_rx_ts);
-        printf("\n");
         dwt_setrxtimeout(0);
         status = POLLING;
         dwt_rxenable(DWT_START_RX_IMMEDIATE);
@@ -244,14 +235,6 @@ void handle_blink_msg(blink_msg_t* msg) {
     {
         // Increment frame sequence number after transmission of the poll message (modulo 256).
         frame_seq_nb++;
-        if(plop) {
-            printf(">OBlink[%x]:%lld\n", get_my_id(), blink_ts_master);
-        } else {
-            printf(">XBlink[%x]:%lld\n", get_my_id(), blink_ts_master);
-        }
-    }
-    else {
-        printf("failed to send blink report. ret: %d\n", get_tdoa_index(get_my_id()));
     }
 }
 
@@ -265,7 +248,7 @@ void handle_blink_report_msg(blink_report_msg_t* msg) {
         if(msg->blink_id == last_blink_id) {
             int64_t dt = timestamp_diff_signed(_master_blink_rx_ts, msg->blink_rx_ts) ;
             double distance = dt * DWT_TIME_UNITS * SPEED_OF_LIGHT;
-            printf("[%X] %.2f\n", msg->header.src_id, distance);
+            ARG_UNUSED(distance);
         }
     }
 

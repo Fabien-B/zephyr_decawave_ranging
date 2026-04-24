@@ -168,9 +168,6 @@ void handle_resp_msg(resp_msg_t* msg, bool double_sided) {
             // /* Increment frame sequence number after transmission of the poll message (modulo 256). */
             frame_seq_nb++;
         }
-        else {
-            printf("failed to send response. ret: %d\n", ret);
-        }
     } else {
         dwt_setrxtimeout(0);
         dwt_rxenable(DWT_START_RX_IMMEDIATE);
@@ -240,9 +237,6 @@ void handle_poll_msg(poll_msg_t* msg, bool double_sided) {
     {
         // /* Increment frame sequence number after transmission of the poll message (modulo 256). */
         frame_seq_nb++;
-    }
-    else {
-        printf("failed to send response. ret: %d\n", ret);
     }
     
 }

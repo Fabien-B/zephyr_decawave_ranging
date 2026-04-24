@@ -84,7 +84,7 @@ static void cbRxTo(const dwt_cb_data_t *cb_data) {
 }
 
 static void cbRxErr(const dwt_cb_data_t *cb_data) {
-    printf("RxErr\n");
+    ARG_UNUSED(cb_data);
 }
 
 static void cbTxDone(const dwt_cb_data_t *cb_data) {
@@ -124,7 +124,6 @@ static void cbRxOk(const dwt_cb_data_t *cb_data) {
 
     // check the type of the frame and the PAN ID.
     if(header->frame_control != FRAME_CONTROL || header->pan_id != MY_PAN_ID) {
-        printf("Bad frame: 0x%x, 0x%x\n", header->frame_control, header->frame_role);
         return;
     }
 
@@ -136,31 +135,24 @@ static void cbRxOk(const dwt_cb_data_t *cb_data) {
     {
     case DF_SS_RANGING_POLL:
         handle_poll_msg((poll_msg_t*)header, false);
-        printf("SS POLL\n");
         break;
     case DF_DS_RANGING_POLL:
         handle_poll_msg((poll_msg_t*)header, true);
-        printf("DS POLL\n");
         break;
     case DF_SS_RANGING_RESP:
         handle_resp_msg((resp_msg_t*)header, false);
-        printf("SS RESP\n");
         break;
     case DF_DS_RANGING_RESP:
         handle_resp_msg((resp_msg_t*)header, true);
-        printf("DS RESP\n");
         break;
     case DF_DS_RANGING_FINAL:
         handle_final_msg((final_msg_t*)header);
-        printf("DS FINAL\n");
         break;
     case DF_TDOA_SYNC:
         handle_sync_msg((sync_msg_t*)header);
-        printf("SYNC\n");
         break;
     case DF_TDOA_BLINK:
         handle_blink_msg((blink_msg_t*)header);
-        printf("BLINK\n");
         break;
     case DF_TDOA_BLINK_REPORT:
         handle_blink_report_msg((blink_report_msg_t*)header);
@@ -170,7 +162,7 @@ static void cbRxOk(const dwt_cb_data_t *cb_data) {
         handle_com_msg(&rx_msg.com);
         break;
     default:
-        printf("Unknown frame role: %d\n", header->frame_role);
+        break;
     }
 }
 
@@ -220,7 +212,7 @@ int pdecInit(uint32_t* dev_id) {
     uint32_t id = dwt_readdevid();
 	int ret = dwt_check_dev_id();
     if(ret != DWT_SUCCESS) {
-		printf("Bad device ID: %x\n", id);
+        ARG_UNUSED(id);
         return ret;
 	}
     
@@ -235,14 +227,12 @@ int pdecInit(uint32_t* dev_id) {
 
     ret = dwt_initialise(DWT_DW_INIT);
     if (ret != DWT_SUCCESS) {
-        printf("deca INIT FAILED\n");
         return ret;
     }
     dw3000_spi_speed_fast();
     
     ret = dwt_configure(&config);
     if (ret != DWT_SUCCESS) {
-        printf("deca CONFIG FAILED\n");
         return ret;
     }
     

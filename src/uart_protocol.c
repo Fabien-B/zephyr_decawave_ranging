@@ -68,14 +68,11 @@ static void set_mode(enum pdec_uart_mode mode)
     if (mode == PDEC_UART_MODE_ASCII) {
         ret = pdec_uart_shell_start();
         if (ret < 0 && ret != -EALREADY) {
-            printf("Failed to start UART shell: %d\n", ret);
             return;
         }
     } else {
         ret = pdec_uart_shell_stop();
-        if (ret < 0 && ret != -ENOTSUP) {
-            printf("Failed to stop UART shell: %d\n", ret);
-        }
+        ARG_UNUSED(ret);
     }
 
     uart_protocol.mode = mode;
@@ -167,9 +164,6 @@ static void handle_binary_frame_byte(uint8_t c)
     case BINARY_RX_CHK:
         if (c == pdec_uart_binary_checksum(parser->payload, parser->len)) {
             pdec_uart_on_binary_frame(parser->payload, parser->len, c);
-        } else {
-            printf("UART checksum mismatch: expected 0x%02x got 0x%02x\n",
-                   pdec_uart_binary_checksum(parser->payload, parser->len), c);
         }
         binary_parser_reset();
         break;
@@ -204,10 +198,7 @@ static void uart_protocol_work_handler(struct k_work *work)
         }
     } while (count > 0);
 
-    if (uart_protocol.dropped_bytes > 0) {
-        printf("UART RX overflow, dropped %u byte(s)\n", (unsigned int)uart_protocol.dropped_bytes);
-        uart_protocol.dropped_bytes = 0;
-    }
+    uart_protocol.dropped_bytes = 0;
 }
 
 static void uart_protocol_isr(const struct device *dev, void *user_data)
@@ -240,7 +231,6 @@ int pdec_uart_protocol_init(void)
 {
     uart_protocol.uart = DEVICE_DT_GET(UART_DEVICE_NODE);
     if (!device_is_ready(uart_protocol.uart)) {
-        printf("UART protocol init failed: UART device not ready\n");
         return -ENODEV;
     }
 
@@ -252,18 +242,15 @@ int pdec_uart_protocol_init(void)
 
     int ret = pdec_uart_shell_init();
     if (ret < 0) {
-        printf("UART protocol init failed: shell init error %d\n", ret);
         return ret;
     }
 
     ret = uart_irq_callback_user_data_set(uart_protocol.uart, uart_protocol_isr, NULL);
     if (ret < 0) {
-        printf("UART protocol init failed: callback setup error %d\n", ret);
         return ret;
     }
 
     uart_irq_rx_enable(uart_protocol.uart);
-    printf("UART protocol ready in binary mode\n");
     return 0;
 }
 
@@ -310,9 +297,7 @@ __attribute__((weak)) uint8_t pdec_uart_binary_checksum(const uint8_t *payload, 
 
 __attribute__((weak)) void pdec_uart_on_binary_frame(const uint8_t *payload, uint8_t len, uint8_t chk)
 {
-    printf("UART binary frame len=%u chk=0x%02x\n", len, chk);
-    for (uint8_t i = 0; i < len; ++i) {
-        printf(" %02x", payload[i]);
-    }
-    printf("\n");
+    ARG_UNUSED(payload);
+    ARG_UNUSED(len);
+    ARG_UNUSED(chk);
 }
