@@ -112,6 +112,7 @@ typedef enum {
     DF_TDOA_SYNC = 0xE5,
     DF_TDOA_BLINK = 0xE6,
     DF_TDOA_BLINK_REPORT = 0xE7,
+    DF_COM_MSG = 0xE8,
 } frame_role_t;
 
 
@@ -126,7 +127,7 @@ int64_t timestamp_diff_signed(uint64_t a, uint64_t b);
 uint16_t get_my_id();
 
 
-void send_data_msg(uint8_t* buffer, uint8_t len);
+void send_data_msg(uint16_t dst_id, uint8_t* buffer, uint8_t len);
 
 // frame control:
 // 2:0    001  data
@@ -157,4 +158,3 @@ void send_data_msg(uint8_t* buffer, uint8_t len);
  * 1 uus = 512 / 499.2 µs and 1 µs = 499.2 * 128 dtu. */
  // F*dt = (499.2MHz*128) * 1e-6s = 63897.6   timestamp increment per microseconds
 #define UUS_TO_DWT_TIME 63898
-

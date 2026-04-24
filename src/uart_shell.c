@@ -125,8 +125,50 @@ static int cmd_uart_binary(const struct shell *sh, size_t argc, char **argv)
     return 0;
 }
 
+static int cmd_uart_send(const struct shell *sh, size_t argc, char **argv)
+{
+    uint8_t payload[PAYLOAD_FRAME_LEN_MAX];
+    size_t len = 0;
+    int err = 0;
+    uint16_t dst_id;
+
+    if (argc < 3) {
+        shell_print(sh, "Usage: uart send <dst_id> <message>");
+        return -EINVAL;
+    }
+
+    dst_id = (uint16_t)shell_strtoul(argv[1], 0, &err);
+    if (err != 0) {
+        shell_print(sh, "Invalid ID: %s", argv[1]);
+        return err;
+    }
+
+    for (size_t i = 2; i < argc; i++) {
+        size_t part_len = strlen(argv[i]);
+        size_t extra = part_len + ((i > 2) ? 1U : 0U);
+
+        if ((len + extra) > PAYLOAD_FRAME_LEN_MAX) {
+            shell_print(sh, "Message too long: %u bytes max", PAYLOAD_FRAME_LEN_MAX);
+            return -EMSGSIZE;
+        }
+
+        if (i > 2) {
+            payload[len++] = ' ';
+        }
+
+        memcpy(&payload[len], argv[i], part_len);
+        len += part_len;
+    }
+
+    send_data_msg(dst_id, payload, (uint8_t)len);
+    shell_print(sh, "Sent %u byte(s) to 0x%04x", (unsigned int)len, dst_id);
+
+    return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_uart,
     SHELL_CMD(binary, NULL, "Switch UART back to binary mode.", cmd_uart_binary),
+    SHELL_CMD(send, NULL, "Send an ASCII data message.", cmd_uart_send),
     SHELL_SUBCMD_SET_END
 );
 

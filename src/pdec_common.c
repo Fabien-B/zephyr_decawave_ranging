@@ -14,11 +14,14 @@
 #include <dw3000_hw.h>
 #include <dw3000_spi.h>
 
+#include "app_print.h"
+
 
 static void cbTxDone(const dwt_cb_data_t *cb_data);
 static void cbRxOk(const dwt_cb_data_t *cb_data);
 static void cbRxTo(const dwt_cb_data_t *cb_data);
 static void cbRxErr(const dwt_cb_data_t *cb_data);
+static void handle_com_msg(const com_msg_t *msg);
 
 
 dwt_config_t config = {
@@ -88,6 +91,17 @@ static void cbTxDone(const dwt_cb_data_t *cb_data) {
     dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
 }
 
+static void handle_com_msg(const com_msg_t *msg)
+{
+    uint8_t len = msg->len;
+
+    if (len > PAYLOAD_FRAME_LEN_MAX) {
+        len = PAYLOAD_FRAME_LEN_MAX;
+    }
+
+    pdec_printf("[0x%04x] %.*s\n", msg->header.src_id, (int)len, msg->payload);
+}
+
 
 
 
@@ -152,16 +166,26 @@ static void cbRxOk(const dwt_cb_data_t *cb_data) {
         handle_blink_report_msg((blink_report_msg_t*)header);
         //printf("BLINK REPORT\n");
         break;
+    case DF_COM_MSG:
+        handle_com_msg(&rx_msg.com);
+        break;
     default:
         printf("Unknown frame role: %d\n", header->frame_role);
     }
 }
 
-void send_data_msg(uint8_t* buffer, uint8_t len) {
+void send_data_msg(uint16_t dst_id, uint8_t* buffer, uint8_t len) {
     com_msg_t msg;
     if(len > PAYLOAD_FRAME_LEN_MAX) {
         return;
     }
+
+    msg.header.frame_control = FRAME_CONTROL;
+    msg.header.seq_number = frame_seq_nb;
+    msg.header.pan_id = MY_PAN_ID;
+    msg.header.dst_id = dst_id;
+    msg.header.src_id = get_my_id();
+    msg.header.frame_role = DF_COM_MSG;
     msg.len = len;
     memcpy(msg.payload, buffer, len);
 
@@ -175,6 +199,8 @@ void send_data_msg(uint8_t* buffer, uint8_t len) {
 
     dwt_setrxaftertxdelay(0);
     dwt_starttx(DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED);
+
+    frame_seq_nb++;
 }
 
 int pdecInit(uint32_t* dev_id) {
