@@ -284,6 +284,22 @@ void pdec_uart_protocol_write_str(const char *str)
     pdec_uart_protocol_write((const uint8_t *)str, strlen(str));
 }
 
+int pdec_uart_protocol_write_binary_frame(const uint8_t *payload, uint8_t len)
+{
+    uint8_t header[] = {
+        UART_PROTOCOL_SYNC_BYTE,
+        UART_PROTOCOL_SYNC_BYTE,
+        len,
+    };
+    uint8_t chk = pdec_uart_binary_checksum(payload, len);
+
+    pdec_uart_protocol_write(header, sizeof(header));
+    pdec_uart_protocol_write(payload, len);
+    pdec_uart_protocol_write(&chk, 1);
+
+    return 0;
+}
+
 __attribute__((weak)) uint8_t pdec_uart_binary_checksum(const uint8_t *payload, uint8_t len)
 {
     uint8_t checksum = len;

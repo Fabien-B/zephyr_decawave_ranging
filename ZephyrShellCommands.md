@@ -1,7 +1,75 @@
-# Zephyr Shell Commands
+# UART Commands
 
-This application exposes a Zephyr shell over the UART protocol. The UART starts
-in binary mode by default.
+This application exposes both a binary UART protocol and a Zephyr shell over the
+same UART. The UART starts in binary mode by default.
+
+## Binary protocol
+
+Binary frames use this envelope:
+
+```text
+0xff 0xff <len> <payload...> <checksum>
+```
+
+`len` is the number of payload bytes. The checksum is the XOR of `len` and every
+payload byte. Multi-byte integer fields are little-endian.
+
+The first payload byte is the command, response, or event ID.
+
+### Binary commands
+
+| ID | Payload | Description |
+| --- | --- | --- |
+| `0x01` | `<dst_id:u16>` | Range once with a target device. |
+| `0x02` | `<dst_id:u16>` | Get the last known distance to a target device. |
+| `0x03` | none | List known device IDs. |
+| `0x04` | `<dst_id:u16> <data...>` | Send a data payload to a target device. |
+
+For example, `ranging range 0x4567` is encoded as payload bytes:
+
+```text
+01 67 45
+```
+
+### Binary responses
+
+| ID | Payload | Description |
+| --- | --- | --- |
+| `0x7f` | `<command:u8> <status:u8>` | Error response. |
+| `0x81` | `<dst_id:u16> <status:u8> <distance:f32>` | Range result. |
+| `0x82` | `<dst_id:u16> <status:u8> <distance:f32>` | Last known distance result. |
+| `0x83` | `<count:u8> <device_id:u16>...` | Known device list. |
+| `0x84` | `<dst_id:u16> <status:u8> <sent_len:u8>` | Data-send result. |
+
+Status values:
+
+| Value | Meaning |
+| --- | --- |
+| `0x00` | OK |
+| `0x01` | Generic error |
+| `0x02` | Invalid payload length |
+| `0x03` | Distance not found |
+| `0x04` | Range failed |
+| `0x05` | Message too long |
+
+Distances are 32-bit floating-point values in meters.
+
+### Binary ranging events
+
+Binary monitor mode is always on. Whenever a ranging result is produced while
+the UART is in binary mode, the device sends an unsolicited event frame:
+
+| ID | Payload |
+| --- | --- |
+| `0x90` | `<kind:u8> <src_id:u16> <dst_id:u16> <distance:f32>` |
+
+Event kinds:
+
+| Value | Meaning |
+| --- | --- |
+| `0x00` | Single-sided ranging |
+| `0x01` | Double-sided ranging |
+| `0x02` | Indirect/passive ranging |
 
 ## Entering shell mode
 
@@ -22,7 +90,7 @@ uart binary
 
 The device prints `Binary mode enabled` after switching back.
 
-## Ranging commands
+## Shell ranging commands
 
 Device IDs are 16-bit values. Hexadecimal notation is accepted, for example
 `0x4567`. Distances are reported in meters.
@@ -111,65 +179,6 @@ meters:
 ```
 
 Press Enter to stop monitoring and return to the shell prompt.
-
-## Continuous ranging commands
-
-Continuous ranging periodically ranges one or more target devices.
-
-Start continuous ranging:
-
-```text
-ranging continuous start
-```
-
-Stop continuous ranging:
-
-```text
-ranging continuous stop
-```
-
-Set the full-cycle period in milliseconds:
-
-```text
-ranging continuous freq 500
-```
-
-With multiple targets, the period is spread across all targets in the active
-target list.
-
-Add a target to the custom target list:
-
-```text
-ranging continuous add 0x4567
-```
-
-Remove a target from the custom target list:
-
-```text
-ranging continuous remove 0x4567
-```
-
-Reset the target list back to all known devices except this device:
-
-```text
-ranging continuous reset
-```
-
-Show continuous ranging status and targets:
-
-```text
-ranging continuous list
-```
-
-Example output:
-
-```text
-Continuous ranging: running
-Mode: all
-Full-cycle period: 500 ms
-Targets (1):
- 0x4567
-```
 
 ## UART commands
 

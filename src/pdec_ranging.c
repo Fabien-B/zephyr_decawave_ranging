@@ -1,6 +1,7 @@
 #include"pdec_common.h"
 #include "pdec_database.h"
 #include "pdec_ranging.h"
+#include "uart_binary.h"
 
 #include <stdio.h>
 #include <zephyr/kernel.h>
@@ -70,6 +71,20 @@ static const char *ranging_event_kind_label(enum ranging_event_kind kind)
     }
 }
 
+static uint8_t binary_ranging_event_kind(enum ranging_event_kind kind)
+{
+    switch (kind) {
+    case RANGING_EVENT_KIND_SS:
+        return PDEC_BINARY_RANGING_EVENT_SS;
+    case RANGING_EVENT_KIND_DS:
+        return PDEC_BINARY_RANGING_EVENT_DS;
+    case RANGING_EVENT_KIND_IN:
+    case RANGING_EVENT_KIND_STOP:
+    default:
+        return PDEC_BINARY_RANGING_EVENT_IN;
+    }
+}
+
 static bool should_print_event(const struct ranging_event *event)
 {
     if (monitor_scope == RANGING_MONITOR_SCOPE_ALL) {
@@ -90,6 +105,11 @@ static void publish_ranging_event(uint16_t src_id, uint16_t dst_id, double dista
         .distance = distance,
         .kind = kind,
     };
+
+    if (kind != RANGING_EVENT_KIND_STOP) {
+        pdec_uart_binary_publish_ranging_event(binary_ranging_event_kind(kind),
+                                               src_id, dst_id, distance);
+    }
 
     (void)k_msgq_put(&monitor_queue, &event, K_NO_WAIT);
 }

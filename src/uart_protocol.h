@@ -14,6 +14,7 @@ void pdec_uart_protocol_set_mode(enum pdec_uart_mode mode);
 
 void pdec_uart_protocol_write(const uint8_t *data, size_t len);
 void pdec_uart_protocol_write_str(const char *str);
+int pdec_uart_protocol_write_binary_frame(const uint8_t *payload, uint8_t len);
 
 /*
  * Default checksum is XOR(LEN, PAYLOAD...). Override this symbol if your wire

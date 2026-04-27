@@ -194,6 +194,7 @@ static int cmd_ranging_range(const struct shell *sh, size_t argc, char **argv)
 
     double old_distance = get_distance(get_my_id(), dst);
     send_poll(dst, true);
+    // TODO replace by event based trigger
     k_msleep(20);
     double new_distance = get_distance(get_my_id(), dst);
     if(new_distance == old_distance) {
