@@ -37,6 +37,10 @@ int get_device_index(uint16_t id) {
 }
 
 uint16_t get_device_id(int index) {
+    if (index == 0 && devices[0] == 0) {
+        devices[0] = get_my_id();
+    }
+
     if (index >= 0 && index < NUM_DEVICES_MAX) {
         return devices[index];
     }
