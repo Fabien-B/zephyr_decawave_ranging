@@ -10,6 +10,8 @@
 #include "pdec_ranging.h"
 #include "uart_protocol.h"
 
+static void send_distance_msg(uint8_t msg, uint16_t dst_id, uint8_t status, double distance);
+
 enum pdec_binary_cmd {
     PDEC_BINARY_CMD_RANGE = 0x01,
     PDEC_BINARY_CMD_GET_DISTANCE = 0x02,
@@ -39,6 +41,10 @@ typedef struct __attribute__((packed)) {
     uint8_t cmd;
     uint16_t dst_id;
 } pdec_binary_range_cmd_t;
+
+struct pdec_binary_range_request {
+    uint16_t dst_id;
+};
 
 typedef struct __attribute__((packed)) {
     uint8_t cmd;
@@ -98,6 +104,16 @@ BUILD_ASSERT(sizeof(pdec_binary_device_list_msg_t) == 22);
 BUILD_ASSERT(sizeof(pdec_binary_send_data_result_msg_t) == 5);
 BUILD_ASSERT(sizeof(pdec_binary_ranging_event_msg_t) == 10);
 
+#define BINARY_RANGE_STACK_SIZE 2048
+#define BINARY_RANGE_PRIORITY 5
+#define BINARY_RANGE_QUEUE_LEN 1
+
+K_MSGQ_DEFINE(binary_range_queue, sizeof(struct pdec_binary_range_request),
+              BINARY_RANGE_QUEUE_LEN, 2);
+K_THREAD_STACK_DEFINE(binary_range_stack, BINARY_RANGE_STACK_SIZE);
+static struct k_thread binary_range_thread;
+static bool binary_range_thread_started;
+
 static void send_error(uint8_t cmd, uint8_t status)
 {
     pdec_binary_error_msg_t payload = {
@@ -108,6 +124,45 @@ static void send_error(uint8_t cmd, uint8_t status)
 
     (void)pdec_uart_protocol_write_binary_frame((const uint8_t *)&payload,
                                                 sizeof(payload));
+}
+
+static void binary_range_worker(void *p1, void *p2, void *p3)
+{
+    ARG_UNUSED(p1);
+    ARG_UNUSED(p2);
+    ARG_UNUSED(p3);
+
+    struct pdec_binary_range_request request;
+
+    while (true) {
+        if (k_msgq_get(&binary_range_queue, &request, K_FOREVER) != 0) {
+            continue;
+        }
+
+        double distance;
+        int ret = request_range(request.dst_id, true, &distance, K_MSEC(100));
+        if (ret != 0) {
+            send_distance_msg(PDEC_BINARY_MSG_RANGE_RESULT, request.dst_id,
+                              PDEC_BINARY_STATUS_RANGE_FAILED, 0.0);
+            continue;
+        }
+
+        send_distance_msg(PDEC_BINARY_MSG_RANGE_RESULT, request.dst_id,
+                          PDEC_BINARY_STATUS_OK, distance);
+    }
+}
+
+static void start_binary_range_thread(void)
+{
+    if (binary_range_thread_started) {
+        return;
+    }
+
+    k_thread_create(&binary_range_thread, binary_range_stack,
+                    K_THREAD_STACK_SIZEOF(binary_range_stack),
+                    binary_range_worker, NULL, NULL, NULL,
+                    BINARY_RANGE_PRIORITY, 0, K_NO_WAIT);
+    binary_range_thread_started = true;
 }
 
 static void send_distance_msg(uint8_t msg, uint16_t dst_id, uint8_t status, double distance)
@@ -131,21 +186,16 @@ static void handle_range_cmd(const uint8_t *payload, uint8_t len)
     }
 
     const pdec_binary_range_cmd_t *cmd = (const pdec_binary_range_cmd_t *)payload;
-    double old_distance = get_distance(get_my_id(), cmd->dst_id);
+    struct pdec_binary_range_request request = {
+        .dst_id = cmd->dst_id,
+    };
 
-    send_poll(cmd->dst_id, true);
-    // TODO replace by event based trigger
-    k_msleep(20);
+    start_binary_range_thread();
 
-    double new_distance = get_distance(get_my_id(), cmd->dst_id);
-    if (new_distance == old_distance) {
+    if (k_msgq_put(&binary_range_queue, &request, K_NO_WAIT) != 0) {
         send_distance_msg(PDEC_BINARY_MSG_RANGE_RESULT, cmd->dst_id,
                           PDEC_BINARY_STATUS_RANGE_FAILED, 0.0);
-        return;
     }
-
-    send_distance_msg(PDEC_BINARY_MSG_RANGE_RESULT, cmd->dst_id,
-                      PDEC_BINARY_STATUS_OK, new_distance);
 }
 
 static void handle_get_distance_cmd(const uint8_t *payload, uint8_t len)

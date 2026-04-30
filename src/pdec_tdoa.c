@@ -55,6 +55,10 @@ void tdoa_init() {
 }
 
 void send_sync() {
+    (void)pdec_radio_submit_sync();
+}
+
+void send_sync_now() {
     tx_msg.header.frame_control = FRAME_CONTROL;
     tx_msg.header.seq_number = frame_seq_nb;
     tx_msg.header.pan_id = MY_PAN_ID;
@@ -96,6 +100,8 @@ void send_sync() {
     {
         // Increment frame sequence number after transmission of the poll message (modulo 256).
         frame_seq_nb++;
+    } else {
+        pdec_radio_restart_rx();
     }
 
 }
@@ -104,6 +110,7 @@ void send_sync() {
 
 void handle_sync_msg(sync_msg_t* msg) {
     if(tdoa_role == TDOA_ROLE_NONE) {
+        pdec_radio_restart_rx();
         return;
     }
 
@@ -128,9 +135,8 @@ void handle_sync_msg(sync_msg_t* msg) {
     
     if(tdoa_role != TDOA_ROLE_BLINKER) {
         // beacons just wait for a BLINK or an other SYNC
-        dwt_setrxtimeout(0);
         status = POLLING;
-        dwt_rxenable(DWT_START_RX_IMMEDIATE);
+        pdec_radio_restart_rx();
     } else {
         // BLINKER will send a BLINK soon (first time slot after SYNC)
 
@@ -163,6 +169,8 @@ void handle_sync_msg(sync_msg_t* msg) {
             // Increment frame sequence number after transmission of the poll message (modulo 256).
             frame_seq_nb++;
             blink_seq_nb++;
+        } else {
+            pdec_radio_restart_rx();
         }
     }
 
@@ -172,6 +180,7 @@ void handle_sync_msg(sync_msg_t* msg) {
 
 void handle_blink_msg(blink_msg_t* msg) {
     if(tdoa_role == TDOA_ROLE_NONE) {
+        pdec_radio_restart_rx();
         return;
     }
 
@@ -183,9 +192,8 @@ void handle_blink_msg(blink_msg_t* msg) {
     if(tdoa_role == TDOA_ROLE_MASTER) {
         // the master does not need to report
         _master_blink_rx_ts = blink_rx_ts;
-        dwt_setrxtimeout(0);
         status = POLLING;
-        dwt_rxenable(DWT_START_RX_IMMEDIATE);
+        pdec_radio_restart_rx();
         return;
     }
     
@@ -235,11 +243,14 @@ void handle_blink_msg(blink_msg_t* msg) {
     {
         // Increment frame sequence number after transmission of the poll message (modulo 256).
         frame_seq_nb++;
+    } else {
+        pdec_radio_restart_rx();
     }
 }
 
 void handle_blink_report_msg(blink_report_msg_t* msg) {
     if(tdoa_role == TDOA_ROLE_NONE) {
+        pdec_radio_restart_rx();
         return;
     }
 
@@ -253,10 +264,9 @@ void handle_blink_report_msg(blink_report_msg_t* msg) {
     }
 
 
-    dwt_setrxtimeout(0);
     status = POLLING;
     // dwt_setrxaftertxdelay(0);
-    dwt_rxenable(DWT_START_RX_IMMEDIATE);
+    pdec_radio_restart_rx();
 }
 
 static void pdec_sync_task(void *, void *, void *) {

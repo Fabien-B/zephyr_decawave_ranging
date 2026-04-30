@@ -54,6 +54,19 @@ static struct uart_protocol_ctx uart_protocol = {
     .last_stray_newline_ms = -1,
 };
 
+static K_MUTEX_DEFINE(uart_tx_lock);
+
+static void uart_protocol_write_unlocked(const uint8_t *data, size_t len)
+{
+    if (uart_protocol.uart == NULL) {
+        return;
+    }
+
+    for (size_t i = 0; i < len; ++i) {
+        uart_poll_out(uart_protocol.uart, data[i]);
+    }
+}
+
 static void binary_parser_reset(void)
 {
     uart_protocol.parser.state = BINARY_RX_SYNC_1;
@@ -270,13 +283,9 @@ void pdec_uart_protocol_set_mode(enum pdec_uart_mode mode)
 
 void pdec_uart_protocol_write(const uint8_t *data, size_t len)
 {
-    if (uart_protocol.uart == NULL) {
-        return;
-    }
-
-    for (size_t i = 0; i < len; ++i) {
-        uart_poll_out(uart_protocol.uart, data[i]);
-    }
+    k_mutex_lock(&uart_tx_lock, K_FOREVER);
+    uart_protocol_write_unlocked(data, len);
+    k_mutex_unlock(&uart_tx_lock);
 }
 
 void pdec_uart_protocol_write_str(const char *str)
@@ -293,9 +302,11 @@ int pdec_uart_protocol_write_binary_frame(const uint8_t *payload, uint8_t len)
     };
     uint8_t chk = pdec_uart_binary_checksum(payload, len);
 
-    pdec_uart_protocol_write(header, sizeof(header));
-    pdec_uart_protocol_write(payload, len);
-    pdec_uart_protocol_write(&chk, 1);
+    k_mutex_lock(&uart_tx_lock, K_FOREVER);
+    uart_protocol_write_unlocked(header, sizeof(header));
+    uart_protocol_write_unlocked(payload, len);
+    uart_protocol_write_unlocked(&chk, 1);
+    k_mutex_unlock(&uart_tx_lock);
 
     return 0;
 }

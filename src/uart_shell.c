@@ -192,15 +192,12 @@ static int cmd_ranging_range(const struct shell *sh, size_t argc, char **argv)
         return err;
     }
 
-    double old_distance = get_distance(get_my_id(), dst);
-    send_poll(dst, true);
-    // TODO replace by event based trigger
-    k_msleep(20);
-    double new_distance = get_distance(get_my_id(), dst);
-    if(new_distance == old_distance) {
+    double distance;
+    int ret = request_range(dst, true, &distance, K_MSEC(100));
+    if(ret != 0) {
         shell_print(sh, "Ranging with 0x%04x failed !", dst);
     } else {
-        shell_print(sh, "0x%04x: %.02fm", dst, new_distance);
+        shell_print(sh, "0x%04x: %.02fm", dst, distance);
     }
     
     return 0;

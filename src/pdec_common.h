@@ -129,6 +129,11 @@ uint16_t get_my_id();
 
 void send_data_msg(uint16_t dst_id, uint8_t* buffer, uint8_t len);
 
+int pdec_radio_submit_poll(uint16_t dst_id, bool double_sided);
+int pdec_radio_submit_data(uint16_t dst_id, const uint8_t *buffer, uint8_t len);
+int pdec_radio_submit_sync(void);
+void pdec_radio_restart_rx(void);
+
 // frame control:
 // 2:0    001  data
 // 3      0    no security

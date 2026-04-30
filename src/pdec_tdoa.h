@@ -14,4 +14,3 @@ void handle_sync_msg(sync_msg_t* msg);
 void handle_blink_msg(blink_msg_t* msg);
 void handle_blink_report_msg(blink_report_msg_t* msg);
 void pdecTdoaStart(tdoa_role_t role);
-

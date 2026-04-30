@@ -3,6 +3,7 @@
 #include "pdec_ranging.h"
 #include "pdec_tdoa.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
@@ -16,12 +17,49 @@
 
 #include "app_print.h"
 
+#define RADIO_STACK_SIZE 2048
+#define RADIO_PRIORITY -2
+#define RADIO_QUEUE_LEN 16
+
+enum radio_event_kind {
+    RADIO_EVENT_TX_DONE,
+    RADIO_EVENT_RX_OK,
+    RADIO_EVENT_RX_TIMEOUT,
+    RADIO_EVENT_RX_ERROR,
+    RADIO_EVENT_SEND_POLL,
+    RADIO_EVENT_SEND_DATA,
+    RADIO_EVENT_SEND_SYNC,
+};
+
+struct radio_event {
+    enum radio_event_kind kind;
+    union {
+        struct {
+            uint16_t dst_id;
+            bool double_sided;
+        } poll;
+        struct {
+            uint16_t dst_id;
+            uint8_t len;
+            uint8_t payload[PAYLOAD_FRAME_LEN_MAX];
+        } data;
+    };
+};
+
+K_MSGQ_DEFINE(radio_queue, sizeof(struct radio_event), RADIO_QUEUE_LEN, 4);
+K_THREAD_STACK_DEFINE(radio_stack, RADIO_STACK_SIZE);
+static struct k_thread radio_thread_data;
+static bool radio_thread_started;
 
 static void cbTxDone(const dwt_cb_data_t *cb_data);
 static void cbRxOk(const dwt_cb_data_t *cb_data);
 static void cbRxTo(const dwt_cb_data_t *cb_data);
 static void cbRxErr(const dwt_cb_data_t *cb_data);
 static void handle_com_msg(const com_msg_t *msg);
+static void process_rx_ok(void);
+static void send_data_msg_now(uint16_t dst_id, uint8_t* buffer, uint8_t len);
+void send_poll_now(uint16_t dst_id, bool double_sided);
+void send_sync_now(void);
 
 
 dwt_config_t config = {
@@ -76,19 +114,90 @@ static union ranging_msg_u rx_msg;
 
 extern const struct gpio_dt_spec led;
 
+static int submit_radio_event(const struct radio_event *event)
+{
+    return k_msgq_put(&radio_queue, event, K_NO_WAIT);
+}
+
+static void radio_thread(void *p1, void *p2, void *p3)
+{
+    ARG_UNUSED(p1);
+    ARG_UNUSED(p2);
+    ARG_UNUSED(p3);
+
+    struct radio_event event;
+
+    while (true) {
+        if (k_msgq_get(&radio_queue, &event, K_FOREVER) != 0) {
+            continue;
+        }
+
+        switch (event.kind) {
+        case RADIO_EVENT_TX_DONE:
+            dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
+            break;
+        case RADIO_EVENT_RX_OK:
+            process_rx_ok();
+            break;
+        case RADIO_EVENT_RX_TIMEOUT:
+            dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
+            pdec_radio_restart_rx();
+            break;
+        case RADIO_EVENT_RX_ERROR:
+            pdec_radio_restart_rx();
+            break;
+        case RADIO_EVENT_SEND_POLL:
+            send_poll_now(event.poll.dst_id, event.poll.double_sided);
+            break;
+        case RADIO_EVENT_SEND_DATA:
+            send_data_msg_now(event.data.dst_id, event.data.payload, event.data.len);
+            break;
+        case RADIO_EVENT_SEND_SYNC:
+            send_sync_now();
+            break;
+        }
+    }
+}
+
+static void start_radio_thread(void)
+{
+    if (radio_thread_started) {
+        return;
+    }
+
+    k_thread_create(&radio_thread_data, radio_stack, K_THREAD_STACK_SIZEOF(radio_stack),
+                    radio_thread, NULL, NULL, NULL, RADIO_PRIORITY, 0, K_NO_WAIT);
+    radio_thread_started = true;
+}
 
 static void cbRxTo(const dwt_cb_data_t *cb_data) {
-    dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
-    dwt_setrxtimeout(0);
-    dwt_rxenable(DWT_START_RX_IMMEDIATE);
+    ARG_UNUSED(cb_data);
+
+    struct radio_event event = {
+        .kind = RADIO_EVENT_RX_TIMEOUT,
+    };
+
+    (void)submit_radio_event(&event);
 }
 
 static void cbRxErr(const dwt_cb_data_t *cb_data) {
     ARG_UNUSED(cb_data);
+
+    struct radio_event event = {
+        .kind = RADIO_EVENT_RX_ERROR,
+    };
+
+    (void)submit_radio_event(&event);
 }
 
 static void cbTxDone(const dwt_cb_data_t *cb_data) {
-    dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
+    ARG_UNUSED(cb_data);
+
+    struct radio_event event = {
+        .kind = RADIO_EVENT_TX_DONE,
+    };
+
+    (void)submit_radio_event(&event);
 }
 
 static void handle_com_msg(const com_msg_t *msg)
@@ -99,7 +208,8 @@ static void handle_com_msg(const com_msg_t *msg)
         len = PAYLOAD_FRAME_LEN_MAX;
     }
 
-    pdec_printf("[0x%04x] %.*s\n", msg->header.src_id, (int)len, msg->payload);
+    publish_com_event(msg->header.src_id, msg->payload, len);
+    pdec_radio_restart_rx();
 }
 
 
@@ -107,7 +217,8 @@ static void handle_com_msg(const com_msg_t *msg)
 
 
 
-static void cbRxOk(const dwt_cb_data_t *cb_data) {
+static void process_rx_ok(void)
+{
     uint8_t rng;
     
     dwt_writesysstatuslo(DWT_INT_RXFCG_BIT_MASK);
@@ -116,6 +227,7 @@ static void cbRxOk(const dwt_cb_data_t *cb_data) {
     // to check if the range bit is set: rng & DWT_CB_DATA_RX_FLAG_RNG
 
     if (frame_len > sizeof(rx_msg)) {
+        pdec_radio_restart_rx();
         return;
     }
 
@@ -124,6 +236,7 @@ static void cbRxOk(const dwt_cb_data_t *cb_data) {
 
     // check the type of the frame and the PAN ID.
     if(header->frame_control != FRAME_CONTROL || header->pan_id != MY_PAN_ID) {
+        pdec_radio_restart_rx();
         return;
     }
 
@@ -162,13 +275,30 @@ static void cbRxOk(const dwt_cb_data_t *cb_data) {
         handle_com_msg(&rx_msg.com);
         break;
     default:
+        pdec_radio_restart_rx();
         break;
     }
 }
 
+static void cbRxOk(const dwt_cb_data_t *cb_data)
+{
+    ARG_UNUSED(cb_data);
+
+    struct radio_event event = {
+        .kind = RADIO_EVENT_RX_OK,
+    };
+
+    (void)submit_radio_event(&event);
+}
+
 void send_data_msg(uint16_t dst_id, uint8_t* buffer, uint8_t len) {
+    (void)pdec_radio_submit_data(dst_id, buffer, len);
+}
+
+static void send_data_msg_now(uint16_t dst_id, uint8_t* buffer, uint8_t len) {
     com_msg_t msg;
     if(len > PAYLOAD_FRAME_LEN_MAX) {
+        pdec_radio_restart_rx();
         return;
     }
 
@@ -190,9 +320,59 @@ void send_data_msg(uint16_t dst_id, uint8_t* buffer, uint8_t len) {
     dwt_writesysstatuslo(DWT_INT_RX | DWT_INT_TXFRS_BIT_MASK);
 
     dwt_setrxaftertxdelay(0);
-    dwt_starttx(DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED);
+    int ret = dwt_starttx(DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED);
+    if (ret != DWT_SUCCESS) {
+        pdec_radio_restart_rx();
+        return;
+    }
 
     frame_seq_nb++;
+}
+
+void pdec_radio_restart_rx(void)
+{
+    dwt_setrxtimeout(0);
+    dwt_rxenable(DWT_START_RX_IMMEDIATE);
+}
+
+int pdec_radio_submit_poll(uint16_t dst_id, bool double_sided)
+{
+    struct radio_event event = {
+        .kind = RADIO_EVENT_SEND_POLL,
+        .poll = {
+            .dst_id = dst_id,
+            .double_sided = double_sided,
+        },
+    };
+
+    return submit_radio_event(&event);
+}
+
+int pdec_radio_submit_data(uint16_t dst_id, const uint8_t *buffer, uint8_t len)
+{
+    struct radio_event event = {
+        .kind = RADIO_EVENT_SEND_DATA,
+        .data = {
+            .dst_id = dst_id,
+            .len = len,
+        },
+    };
+
+    if (len > PAYLOAD_FRAME_LEN_MAX) {
+        return -EMSGSIZE;
+    }
+
+    memcpy(event.data.payload, buffer, len);
+    return submit_radio_event(&event);
+}
+
+int pdec_radio_submit_sync(void)
+{
+    struct radio_event event = {
+        .kind = RADIO_EVENT_SEND_SYNC,
+    };
+
+    return submit_radio_event(&event);
 }
 
 int pdecInit(uint32_t* dev_id) {
@@ -261,6 +441,8 @@ int pdecInit(uint32_t* dev_id) {
 
     // Enabling LEDs so that for each TX the D1 LED will flash on DW3000 red eval-shield boards.
     dwt_setleds(DWT_LEDS_ENABLE | DWT_LEDS_INIT_BLINK);
+
+    start_radio_thread();
 
     dwt_setrxtimeout(0);
     dwt_rxenable(DWT_START_RX_IMMEDIATE);
