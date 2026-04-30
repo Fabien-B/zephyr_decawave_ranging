@@ -44,6 +44,7 @@ class Message(IntEnum):
     DEVICE_LIST = 0x83
     SEND_DATA_RESULT = 0x84
     RANGING_EVENT = 0x90
+    DATA_EVENT = 0x91
 
 
 class Status(IntEnum):
@@ -99,6 +100,12 @@ class RangingEvent:
     distance_m: float
 
 
+@dataclass(frozen=True)
+class DataEvent:
+    src_id: int
+    data: bytes
+
+
 class PdecUartError(RuntimeError):
     pass
 
@@ -130,9 +137,9 @@ class PdecUart:
         self.serial = self._open_serial(serial_or_port, baudrate, timeout)
         self.timeout = timeout
         self._responses: dict[Message, queue.Queue[bytes]] = {
-            msg: queue.Queue() for msg in Message if msg != Message.RANGING_EVENT
+            msg: queue.Queue() for msg in Message if msg not in {Message.RANGING_EVENT, Message.DATA_EVENT}
         }
-        self._event_handlers: list[Callable[[RangingEvent], None]] = []
+        self._event_handlers: list[Callable[[RangingEvent | DataEvent], None]] = []
         self._write_lock = threading.Lock()
         self._stop_reader = threading.Event()
         self._reader_thread: Optional[threading.Thread] = None
@@ -182,10 +189,10 @@ class PdecUart:
         )
         self._reader_thread.start()
 
-    def add_event_handler(self, handler: Callable[[RangingEvent], None]) -> None:
+    def add_event_handler(self, handler: Callable[[RangingEvent | DataEvent], None]) -> None:
         self._event_handlers.append(handler)
 
-    def remove_event_handler(self, handler: Callable[[RangingEvent], None]) -> None:
+    def remove_event_handler(self, handler: Callable[[RangingEvent | DataEvent], None]) -> None:
         self._event_handlers.remove(handler)
 
     def monitor(self, enabled: bool = True, printer: Callable[[str], None] = print) -> None:
@@ -346,6 +353,12 @@ class PdecUart:
                 handler(event)
             return
 
+        if msg_id == Message.DATA_EVENT:
+            event = self._parse_data_event(payload)
+            for handler in list(self._event_handlers):
+                handler(event)
+            return
+
         if msg_id == Message.ERROR:
             for response_queue in self._responses.values():
                 response_queue.put(payload)
@@ -371,6 +384,17 @@ class PdecUart:
 
         _msg, kind, src_id, dst_id, distance = struct.unpack("<BBHHf", payload)
         return RangingEvent(EventKind(kind), src_id, dst_id, distance)
+
+    @staticmethod
+    def _parse_data_event(payload: bytes) -> DataEvent:
+        if len(payload) < 4 or payload[0] != Message.DATA_EVENT:
+            raise PdecUartError("invalid data event")
+
+        _msg, src_id, data_len = struct.unpack("<BHB", payload[:4])
+        data = payload[4:]
+        if len(data) != data_len:
+            raise PdecUartError("truncated data event")
+        return DataEvent(src_id, data)
 
     def _monitor_loop(self, printer: Callable[[str], None]) -> None:
         while not self._monitor_stop.is_set():

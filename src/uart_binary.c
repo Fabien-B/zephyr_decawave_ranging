@@ -1,6 +1,7 @@
 #include "uart_binary.h"
 
 #include <stdint.h>
+#include <string.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
@@ -26,6 +27,7 @@ enum pdec_binary_msg {
     PDEC_BINARY_MSG_DEVICE_LIST = 0x83,
     PDEC_BINARY_MSG_SEND_DATA_RESULT = 0x84,
     PDEC_BINARY_MSG_RANGING_EVENT = 0x90,
+    PDEC_BINARY_MSG_DATA_EVENT = 0x91,
 };
 
 enum pdec_binary_status {
@@ -94,6 +96,13 @@ typedef struct __attribute__((packed)) {
     float distance;
 } pdec_binary_ranging_event_msg_t;
 
+typedef struct __attribute__((packed)) {
+    uint8_t msg;
+    uint16_t src_id;
+    uint8_t len;
+    uint8_t data[PAYLOAD_FRAME_LEN_MAX];
+} pdec_binary_data_event_msg_t;
+
 BUILD_ASSERT(sizeof(pdec_binary_range_cmd_t) == 3);
 BUILD_ASSERT(sizeof(pdec_binary_get_distance_cmd_t) == 3);
 BUILD_ASSERT(sizeof(pdec_binary_list_devices_cmd_t) == 1);
@@ -103,6 +112,7 @@ BUILD_ASSERT(sizeof(pdec_binary_distance_msg_t) == 8);
 BUILD_ASSERT(sizeof(pdec_binary_device_list_msg_t) == 22);
 BUILD_ASSERT(sizeof(pdec_binary_send_data_result_msg_t) == 5);
 BUILD_ASSERT(sizeof(pdec_binary_ranging_event_msg_t) == 10);
+BUILD_ASSERT(sizeof(pdec_binary_data_event_msg_t) == 117);
 
 #define BINARY_RANGE_STACK_SIZE 2048
 #define BINARY_RANGE_PRIORITY 5
@@ -322,4 +332,29 @@ void pdec_uart_binary_publish_ranging_event(uint8_t kind, uint16_t src_id,
 
     (void)pdec_uart_protocol_write_binary_frame((const uint8_t *)&payload,
                                                 sizeof(payload));
+}
+
+void pdec_uart_binary_publish_data_event(uint16_t src_id, const uint8_t *data,
+                                         uint8_t len)
+{
+    if (pdec_uart_protocol_get_mode() != PDEC_UART_MODE_BINARY) {
+        return;
+    }
+
+    if (len > PAYLOAD_FRAME_LEN_MAX) {
+        len = PAYLOAD_FRAME_LEN_MAX;
+    }
+
+    pdec_binary_data_event_msg_t payload = {
+        .msg = PDEC_BINARY_MSG_DATA_EVENT,
+        .src_id = src_id,
+        .len = len,
+    };
+
+    memcpy(payload.data, data, len);
+
+    (void)pdec_uart_protocol_write_binary_frame((const uint8_t *)&payload,
+                                                sizeof(payload.msg) +
+                                                sizeof(payload.src_id) +
+                                                sizeof(payload.len) + len);
 }

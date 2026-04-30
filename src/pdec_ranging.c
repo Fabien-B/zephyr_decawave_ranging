@@ -196,6 +196,8 @@ static void process_results(void *p1, void *p2, void *p3)
         }
 
         if (event.kind == RESULT_EVENT_COM) {
+            pdec_uart_binary_publish_data_event(event.com.src_id, event.com.payload,
+                                                event.com.len);
             pdec_printf("[0x%04x] %.*s\n", event.com.src_id,
                         (int)event.com.len, event.com.payload);
             continue;
