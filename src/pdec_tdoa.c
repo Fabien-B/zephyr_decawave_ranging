@@ -18,7 +18,7 @@
 
 #define SYNC_DELAY 2000  //us
 #define SYNC_SLOT_TIME 5000  //us
-#define SYNC_PERIOD_MS 1000
+#define SYNC_PERIOD_MS 100
 #define SYNC_PER_BEACON_RANGE 10
 #define BLINK_REPORT_TIMEOUT_MARGIN_MS 10
 #define BLINK_REPORTS_MAX 10
@@ -113,6 +113,8 @@ static uint32_t expected_blink_report_timeout_ms(void)
 
 static void finish_blink_report_collection_locked(bool timed_out)
 {
+    uint64_t earliest_ts = 0;
+
     printf("TDOA blink %u reports %u/%u%s\n",
            blink_report_collection_id,
            (unsigned int)blink_report_count,
@@ -120,9 +122,19 @@ static void finish_blink_report_collection_locked(bool timed_out)
            timed_out ? " timeout" : "");
 
     for(size_t i=0; i<blink_report_count; i++) {
-        printf(" report 0x%04x: %" PRIu64 "\n",
+        if(i == 0 ||
+           timestamp_diff_signed(blink_reports[i].blink_rx_ts, earliest_ts) < 0) {
+            earliest_ts = blink_reports[i].blink_rx_ts;
+        }
+    }
+
+    for(size_t i=0; i<blink_report_count; i++) {
+        int64_t dt = timestamp_diff_signed(blink_reports[i].blink_rx_ts, earliest_ts);
+        double distance = dt * DWT_TIME_UNITS * SPEED_OF_LIGHT;
+
+        printf(" report 0x%04x: %.02fm\n",
                blink_reports[i].reporter_id,
-               blink_reports[i].blink_rx_ts);
+               distance);
     }
 
     blink_report_collection_active = false;
