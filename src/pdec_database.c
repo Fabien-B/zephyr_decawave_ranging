@@ -31,7 +31,7 @@ double distances[(NUM_DEVICES_MAX*(NUM_DEVICES_MAX-1))/2] = {0};
 // to store the clock offset of every other agents
 float clock_offsets[NUM_DEVICES_MAX+1] = {0};
 static uint8_t tdoa_roles[NUM_DEVICES_MAX+1] = {
-    [0 ... NUM_DEVICES_MAX] = PDEC_DEVICE_ROLE_UNKNOWN,
+    [0 ... NUM_DEVICES_MAX] = TDOA_ROLE_UNKNOWN,
 };
 static int64_t last_seen_ms[NUM_DEVICES_MAX+1] = {0};
 
@@ -40,17 +40,30 @@ static void reset_distances(void)
     memset(distances, 0, sizeof(distances));
 }
 
-static void ensure_self_device(void)
+static int get_device_count(void)
 {
-    if (devices[0] == 0) {
-        devices[0] = get_my_id();
-        last_seen_ms[0] = k_uptime_get();
+    int count = 0;
+
+    while (count < NUM_DEVICES_MAX && devices[count] != 0) {
+        count++;
     }
+
+    return count;
+}
+
+static int find_device_index(uint16_t id)
+{
+    for(int i=0; i<NUM_DEVICES_MAX; i++) {
+        if(devices[i] == id) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 static void remove_device_at(int index)
 {
-    if (index <= 0 || index >= NUM_DEVICES_MAX) {
+    if (index < 0 || index >= NUM_DEVICES_MAX) {
         return;
     }
 
@@ -63,9 +76,45 @@ static void remove_device_at(int index)
 
     devices[NUM_DEVICES_MAX - 1] = 0;
     clock_offsets[NUM_DEVICES_MAX - 1] = 0;
-    tdoa_roles[NUM_DEVICES_MAX - 1] = PDEC_DEVICE_ROLE_UNKNOWN;
+    tdoa_roles[NUM_DEVICES_MAX - 1] = TDOA_ROLE_UNKNOWN;
     last_seen_ms[NUM_DEVICES_MAX - 1] = 0;
     reset_distances();
+}
+
+static int insert_device_sorted(uint16_t id)
+{
+    int count = get_device_count();
+
+    if (count >= NUM_DEVICES_MAX) {
+        return -1;
+    }
+
+    int insert_index = 0;
+    while (insert_index < count && devices[insert_index] < id) {
+        insert_index++;
+    }
+
+    for (int i = count; i > insert_index; i--) {
+        devices[i] = devices[i - 1];
+        clock_offsets[i] = clock_offsets[i - 1];
+        tdoa_roles[i] = tdoa_roles[i - 1];
+        last_seen_ms[i] = last_seen_ms[i - 1];
+    }
+
+    devices[insert_index] = id;
+    clock_offsets[insert_index] = 0;
+    tdoa_roles[insert_index] = TDOA_ROLE_UNKNOWN;
+    last_seen_ms[insert_index] = k_uptime_get();
+    reset_distances();
+
+    return insert_index;
+}
+
+static void ensure_self_device(void)
+{
+    if (find_device_index(get_my_id()) == -1) {
+        (void)insert_device_sorted(get_my_id());
+    }
 }
 
 static void prune_stale_devices(void)
@@ -74,8 +123,10 @@ static void prune_stale_devices(void)
 
     ensure_self_device();
 
-    for (int i = 1; i < NUM_DEVICES_MAX && devices[i] != 0; ) {
-        if (last_seen_ms[i] != 0 && (now - last_seen_ms[i]) > DEVICE_TIMEOUT_MS) {
+    for (int i = 0; i < NUM_DEVICES_MAX && devices[i] != 0; ) {
+        if (devices[i] != get_my_id() &&
+            last_seen_ms[i] != 0 &&
+            (now - last_seen_ms[i]) > DEVICE_TIMEOUT_MS) {
             remove_device_at(i);
             continue;
         }
@@ -86,13 +137,7 @@ static void prune_stale_devices(void)
 
 int get_device_index(uint16_t id) {
     prune_stale_devices();
-
-    for(int i=0; i<NUM_DEVICES_MAX; i++) {
-        if(devices[i] == id) {
-            return i;
-        }
-    }
-    return -1;
+    return find_device_index(id);
 }
 
 uint16_t get_device_id(int index) {
@@ -112,7 +157,6 @@ uint16_t get_device_id(int index) {
  * @return The index where the device was added, or -1 if the list is full.
  */
 int add_device(uint16_t id) {
-    // Ensure my ID is always at index 0
     ensure_self_device();
 
     int existing_index = get_device_index(id);
@@ -121,15 +165,7 @@ int add_device(uint16_t id) {
         return existing_index;
     }
 
-    for(int i=1; i<NUM_DEVICES_MAX; i++) {
-        if(devices[i] == 0) {
-            devices[i] = id;
-            tdoa_roles[i] = PDEC_DEVICE_ROLE_UNKNOWN;
-            last_seen_ms[i] = k_uptime_get();
-            return i;
-        }
-    }
-    return -1;
+    return insert_device_sorted(id);
 }
 
 void touch_device(uint16_t id)
@@ -164,7 +200,7 @@ uint8_t get_device_tdoa_role(uint16_t id)
         return tdoa_roles[index];
     }
 
-    return PDEC_DEVICE_ROLE_UNKNOWN;
+    return TDOA_ROLE_UNKNOWN;
 }
 
 
@@ -229,27 +265,20 @@ double get_distance(uint16_t a, uint16_t b) {
 }
 
 uint8_t get_tdoa_index(uint16_t id) {
-    uint16_t sorted_devices[NUM_DEVICES_MAX];
+    prune_stale_devices();
+
     int count = 0;
 
     for (int i = 0; i < NUM_DEVICES_MAX && devices[i] != 0; i++) {
-        sorted_devices[count++] = devices[i];
-    }
-
-    for (int i = 0; i < count - 1; i++) {
-        for (int j = 0; j < count - i - 1; j++) {
-            if (sorted_devices[j] > sorted_devices[j + 1]) {
-                uint16_t temp = sorted_devices[j];
-                sorted_devices[j] = sorted_devices[j + 1];
-                sorted_devices[j + 1] = temp;
+        if (tdoa_roles[i] == TDOA_ROLE_BEACON ||
+            tdoa_roles[i] == TDOA_ROLE_MASTER) {
+            if (devices[i] == id) {
+                return (uint8_t)count;
             }
+
+            count++;
         }
     }
 
-    for (int i = 0; i < count; i++) {
-        if (sorted_devices[i] == id) {
-            return (uint8_t)i;
-        }
-    }
     return 255; // not found
 }

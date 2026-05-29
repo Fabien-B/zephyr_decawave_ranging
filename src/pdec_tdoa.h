@@ -3,13 +3,7 @@
 #include <stdbool.h>
 
 #include "pdec_common.h"
-
-typedef enum {
-    TDOA_ROLE_NONE,
-    TDOA_ROLE_BEACON,
-    TDOA_ROLE_BLINKER,
-    TDOA_ROLE_MASTER,
-} tdoa_role_t;
+#include "pdec_database.h"
 
 void send_sync();
 bool handle_sync_msg(sync_msg_t* msg);

@@ -1,7 +1,13 @@
 #pragma once
 #include <inttypes.h>
 
-#define PDEC_DEVICE_ROLE_UNKNOWN 0xff
+typedef enum {
+    TDOA_ROLE_NONE,
+    TDOA_ROLE_BEACON,
+    TDOA_ROLE_BLINKER,
+    TDOA_ROLE_MASTER,
+    TDOA_ROLE_UNKNOWN = 0xff,
+} tdoa_role_t;
 
 /**
  * @brief Find the internal index of a device by its ID.
@@ -38,7 +44,7 @@ void touch_device(uint16_t id);
  * @brief Store the advertised TDOA role for a device.
  *
  * @param id 16-bit device short address.
- * @param role TDOA role value, or PDEC_DEVICE_ROLE_UNKNOWN.
+ * @param role TDOA role value.
  */
 void set_device_tdoa_role(uint16_t id, uint8_t role);
 
@@ -46,7 +52,7 @@ void set_device_tdoa_role(uint16_t id, uint8_t role);
  * @brief Get the last advertised TDOA role for a device.
  *
  * @param id 16-bit device short address.
- * @return TDOA role value, or PDEC_DEVICE_ROLE_UNKNOWN if unknown.
+ * @return TDOA role value, or TDOA_ROLE_UNKNOWN if unknown.
  */
 uint8_t get_device_tdoa_role(uint16_t id);
 
