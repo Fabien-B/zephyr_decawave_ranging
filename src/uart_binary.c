@@ -28,6 +28,7 @@ enum pdec_binary_msg {
     PDEC_BINARY_MSG_SEND_DATA_RESULT = 0x84,
     PDEC_BINARY_MSG_RANGING_EVENT = 0x90,
     PDEC_BINARY_MSG_DATA_EVENT = 0x91,
+    PDEC_BINARY_MSG_TDOA_REPORT_EVENT = 0x92,
 };
 
 enum pdec_binary_status {
@@ -357,4 +358,38 @@ void pdec_uart_binary_publish_data_event(uint16_t src_id, const uint8_t *data,
                                                 sizeof(payload.msg) +
                                                 sizeof(payload.src_id) +
                                                 sizeof(payload.len) + len);
+}
+
+void pdec_uart_binary_publish_tdoa_report_event(uint32_t blink_id, uint8_t expected_count,
+                                                bool timed_out, const uint16_t *reporter_id,
+                                                const double *distance_m, uint8_t count)
+{
+    uint8_t payload[1 + sizeof(uint32_t) + 3 + (10 * (sizeof(uint16_t) + sizeof(float)))];
+    size_t offset = 0;
+
+    if (pdec_uart_protocol_get_mode() != PDEC_UART_MODE_BINARY) {
+        return;
+    }
+
+    if (count > 10) {
+        count = 10;
+    }
+
+    payload[offset++] = PDEC_BINARY_MSG_TDOA_REPORT_EVENT;
+    memcpy(&payload[offset], &blink_id, sizeof(blink_id));
+    offset += sizeof(blink_id);
+    payload[offset++] = expected_count;
+    payload[offset++] = count;
+    payload[offset++] = timed_out ? 1 : 0;
+
+    for (uint8_t i = 0; i < count; i++) {
+        float distance = (float)distance_m[i];
+
+        memcpy(&payload[offset], &reporter_id[i], sizeof(reporter_id[i]));
+        offset += sizeof(reporter_id[i]);
+        memcpy(&payload[offset], &distance, sizeof(distance));
+        offset += sizeof(distance);
+    }
+
+    (void)pdec_uart_protocol_write_binary_frame(payload, offset);
 }

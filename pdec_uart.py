@@ -45,6 +45,7 @@ class Message(IntEnum):
     SEND_DATA_RESULT = 0x84
     RANGING_EVENT = 0x90
     DATA_EVENT = 0x91
+    TDOA_REPORT_EVENT = 0x92
 
 
 class Status(IntEnum):
@@ -106,6 +107,23 @@ class DataEvent:
     data: bytes
 
 
+@dataclass(frozen=True)
+class TdoaReportEntry:
+    reporter_id: int
+    distance_m: float
+
+
+@dataclass(frozen=True)
+class TdoaReportEvent:
+    blink_id: int
+    expected_count: int
+    timed_out: bool
+    reports: tuple[TdoaReportEntry, ...]
+
+
+PdecEvent = RangingEvent | DataEvent | TdoaReportEvent
+
+
 class PdecUartError(RuntimeError):
     pass
 
@@ -137,15 +155,17 @@ class PdecUart:
         self.serial = self._open_serial(serial_or_port, baudrate, timeout)
         self.timeout = timeout
         self._responses: dict[Message, queue.Queue[bytes]] = {
-            msg: queue.Queue() for msg in Message if msg not in {Message.RANGING_EVENT, Message.DATA_EVENT}
+            msg: queue.Queue()
+            for msg in Message
+            if msg not in {Message.RANGING_EVENT, Message.DATA_EVENT, Message.TDOA_REPORT_EVENT}
         }
-        self._event_handlers: list[Callable[[RangingEvent | DataEvent], None]] = []
+        self._event_handlers: list[Callable[[PdecEvent], None]] = []
         self._write_lock = threading.Lock()
         self._stop_reader = threading.Event()
         self._reader_thread: Optional[threading.Thread] = None
         self._monitor_thread: Optional[threading.Thread] = None
         self._monitor_stop = threading.Event()
-        self._monitor_queue: queue.Queue[RangingEvent] = queue.Queue()
+        self._monitor_queue: queue.Queue[RangingEvent | TdoaReportEvent] = queue.Queue()
 
         if start_reader:
             self.start_reader()
@@ -189,10 +209,10 @@ class PdecUart:
         )
         self._reader_thread.start()
 
-    def add_event_handler(self, handler: Callable[[RangingEvent | DataEvent], None]) -> None:
+    def add_event_handler(self, handler: Callable[[PdecEvent], None]) -> None:
         self._event_handlers.append(handler)
 
-    def remove_event_handler(self, handler: Callable[[RangingEvent | DataEvent], None]) -> None:
+    def remove_event_handler(self, handler: Callable[[PdecEvent], None]) -> None:
         self._event_handlers.remove(handler)
 
     def monitor(self, enabled: bool = True, printer: Callable[[str], None] = print) -> None:
@@ -279,6 +299,13 @@ class PdecUart:
             self.start_monitor()
             return "monitor started"
 
+        if cmd == "tdoa" and len(parts) >= 2 and parts[1].lower() == "monitor":
+            if len(parts) >= 3 and parts[2].lower() in {"off", "stop", "0", "false"}:
+                self.stop_monitor()
+                return "monitor stopped"
+            self.start_monitor()
+            return "monitor started"
+
         if cmd == "range" and len(parts) == 2:
             return self.range(_parse_id(parts[1]))
 
@@ -291,7 +318,7 @@ class PdecUart:
         if cmd == "send" and len(parts) >= 3:
             return self.send_data(_parse_id(parts[1]), " ".join(parts[2:]))
 
-        raise ValueError("commands: monitor [off], range <id>, get <id>, list, send <id> <message>")
+        raise ValueError("commands: monitor [off], tdoa monitor [off], range <id>, get <id>, list, send <id> <message>")
 
     def _send_frame(self, payload: bytes) -> None:
         if len(payload) > self.MAX_PAYLOAD_LEN:
@@ -359,6 +386,14 @@ class PdecUart:
                 handler(event)
             return
 
+        if msg_id == Message.TDOA_REPORT_EVENT:
+            event = self._parse_tdoa_report_event(payload)
+            if self._monitor_thread is not None and self._monitor_thread.is_alive():
+                self._monitor_queue.put(event)
+            for handler in list(self._event_handlers):
+                handler(event)
+            return
+
         if msg_id == Message.ERROR:
             for response_queue in self._responses.values():
                 response_queue.put(payload)
@@ -396,6 +431,26 @@ class PdecUart:
             raise PdecUartError("truncated data event")
         return DataEvent(src_id, data)
 
+    @staticmethod
+    def _parse_tdoa_report_event(payload: bytes) -> TdoaReportEvent:
+        header_len = 8
+        if len(payload) < header_len or payload[0] != Message.TDOA_REPORT_EVENT:
+            raise PdecUartError("invalid TDOA report event")
+
+        _msg, blink_id, expected_count, count, timed_out = struct.unpack("<BIBBB", payload[:header_len])
+        expected_len = header_len + (count * 6)
+        if len(payload) != expected_len:
+            raise PdecUartError("truncated TDOA report event")
+
+        reports: list[TdoaReportEntry] = []
+        offset = header_len
+        for _ in range(count):
+            reporter_id, distance_m = struct.unpack("<Hf", payload[offset:offset + 6])
+            reports.append(TdoaReportEntry(reporter_id, distance_m))
+            offset += 6
+
+        return TdoaReportEvent(blink_id, expected_count, bool(timed_out), tuple(reports))
+
     def _monitor_loop(self, printer: Callable[[str], None]) -> None:
         while not self._monitor_stop.is_set():
             try:
@@ -405,7 +460,12 @@ class PdecUart:
             printer(format_event(event))
 
 
-def format_event(event: RangingEvent) -> str:
+def format_event(event: RangingEvent | TdoaReportEvent) -> str:
+    if isinstance(event, TdoaReportEvent):
+        suffix = " timeout" if event.timed_out else ""
+        reports = ", ".join(f"0x{r.reporter_id:04x}: {r.distance_m:.02f}m" for r in event.reports)
+        return f"[TDOA] blink {event.blink_id} reports {len(event.reports)}/{event.expected_count}{suffix}: {reports}"
+
     label = EVENT_KIND_NAMES.get(event.kind, f"0x{event.kind:02x}")
     return f"[{label}] 0x{event.src_id:04x} <-> 0x{event.dst_id:04x}: {event.distance_m:.02f}m"
 

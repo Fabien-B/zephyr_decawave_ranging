@@ -470,6 +470,7 @@ int pdec_radio_submit_discovery(void)
 int pdecInit(uint32_t* dev_id) {
 
     ranging_init();
+    tdoa_init();
 
     // init DW driver
     dw3000_hw_init();

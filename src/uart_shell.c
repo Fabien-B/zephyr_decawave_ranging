@@ -456,6 +456,22 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_ranging,
 
 SHELL_CMD_REGISTER(ranging, &sub_ranging, "UART protocol commands.", NULL);
 
+static int cmd_tdoa_monitor(const struct shell *sh, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    start_tdoa_monitor(sh);
+    return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_tdoa,
+    SHELL_CMD(monitor, NULL, "Monitor TDOA reports.", cmd_tdoa_monitor),
+    SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(tdoa, &sub_tdoa, "TDOA commands.", NULL);
+
 
 
 

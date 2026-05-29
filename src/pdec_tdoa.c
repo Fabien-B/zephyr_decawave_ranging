@@ -2,12 +2,15 @@
 #include "pdec_database.h"
 #include "pdec_tdoa.h"
 #include "pdec_ranging.h"
+#include "uart_binary.h"
 
 #include <stdio.h>
+#include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/types.h>
 #include <zephyr/random/random.h>
+#include <zephyr/shell/shell.h>
 
 #include <deca_device_api.h>
 #include <deca_probe_interface.h>
@@ -27,6 +30,10 @@
 #define SYNC_TASK_STACK_SIZE 1000
 #define SYNC_TASK_PRIORITY 5
 #define SYNC_EVENT_STOP BIT(0)
+#define TDOA_REPORT_QUEUE_LEN 4
+#define TDOA_REPORT_STACK_SIZE 1024
+#define TDOA_MONITOR_STACK_SIZE 1024
+#define ASCII_CTRL_C 0x03
 
 K_THREAD_STACK_DEFINE(sync_stack_area, SYNC_TASK_STACK_SIZE);
 K_EVENT_DEFINE(sync_events);
@@ -61,9 +68,27 @@ struct blink_report_entry {
     uint64_t blink_rx_ts;
 };
 
+struct tdoa_report_event {
+    uint32_t blink_id;
+    uint8_t expected_count;
+    uint8_t count;
+    bool timed_out;
+    uint16_t reporter_id[BLINK_REPORTS_MAX];
+    double distance_m[BLINK_REPORTS_MAX];
+};
+
 static K_MUTEX_DEFINE(blink_report_lock);
 static void blink_report_timeout_handler(struct k_work *work);
 K_WORK_DELAYABLE_DEFINE(blink_report_timeout_work, blink_report_timeout_handler);
+K_MSGQ_DEFINE(tdoa_report_queue, sizeof(struct tdoa_report_event), TDOA_REPORT_QUEUE_LEN, 8);
+K_MSGQ_DEFINE(tdoa_monitor_queue, sizeof(struct tdoa_report_event), TDOA_REPORT_QUEUE_LEN, 8);
+K_THREAD_STACK_DEFINE(tdoa_report_stack, TDOA_REPORT_STACK_SIZE);
+K_THREAD_STACK_DEFINE(tdoa_monitor_stack, TDOA_MONITOR_STACK_SIZE);
+static struct k_thread tdoa_report_thread_data;
+static struct k_thread tdoa_monitor_thread_data;
+static bool tdoa_report_thread_started;
+static bool tdoa_monitor_running;
+static volatile bool tdoa_monitor_stop_requested;
 
 static bool blink_report_collection_active;
 static uint32_t blink_report_collection_id;
@@ -75,6 +100,94 @@ static struct blink_report_entry blink_reports[BLINK_REPORTS_MAX];
 static bool tdoa_role_reports_blinks(tdoa_role_t role)
 {
     return role == TDOA_ROLE_BEACON || role == TDOA_ROLE_MASTER;
+}
+
+static void publish_tdoa_report_event(struct tdoa_report_event *event)
+{
+    if (k_msgq_put(&tdoa_report_queue, event, K_NO_WAIT) != 0) {
+        k_msgq_purge(&tdoa_report_queue);
+        (void)k_msgq_put(&tdoa_report_queue, event, K_NO_WAIT);
+    }
+}
+
+static void tdoa_monitor_bypass(const struct shell *sh, uint8_t *data, size_t len)
+{
+    ARG_UNUSED(sh);
+
+    for (size_t i = 0; i < len; i++) {
+        if (data[i] == ASCII_CTRL_C) {
+            stop_tdoa_monitor();
+        }
+    }
+}
+
+static void tdoa_monitor(void *p1, void *p2, void *p3)
+{
+    const struct shell *shell = p1;
+    struct tdoa_report_event event;
+
+    ARG_UNUSED(p2);
+    ARG_UNUSED(p3);
+
+    shell_set_bypass(shell, tdoa_monitor_bypass);
+
+    while (true) {
+        if (k_msgq_get(&tdoa_monitor_queue, &event, K_FOREVER) != 0) {
+            continue;
+        }
+
+        if (tdoa_monitor_stop_requested) {
+            break;
+        }
+
+        shell_print(shell, "TDOA blink %u reports %u/%u%s",
+                    event.blink_id, event.count, event.expected_count,
+                    event.timed_out ? " timeout" : "");
+        for (uint8_t i = 0; i < event.count; i++) {
+            shell_print(shell, " 0x%04x: %.02fm", event.reporter_id[i], event.distance_m[i]);
+        }
+    }
+
+    shell_set_bypass(shell, NULL);
+    tdoa_monitor_running = false;
+    shell_print(shell, "Stopped");
+}
+
+static void tdoa_report_worker(void *p1, void *p2, void *p3)
+{
+    ARG_UNUSED(p1);
+    ARG_UNUSED(p2);
+    ARG_UNUSED(p3);
+
+    struct tdoa_report_event event;
+
+    while (true) {
+        if (k_msgq_get(&tdoa_report_queue, &event, K_FOREVER) != 0) {
+            continue;
+        }
+
+        pdec_uart_binary_publish_tdoa_report_event(event.blink_id, event.expected_count,
+                                                   event.timed_out, event.reporter_id,
+                                                   event.distance_m, event.count);
+
+        if (tdoa_monitor_running) {
+            (void)k_msgq_put(&tdoa_monitor_queue, &event, K_NO_WAIT);
+        }
+    }
+}
+
+static void start_tdoa_report_thread(void)
+{
+    if (tdoa_report_thread_started) {
+        return;
+    }
+
+    k_thread_create(&tdoa_report_thread_data, tdoa_report_stack,
+                    K_THREAD_STACK_SIZEOF(tdoa_report_stack),
+                    tdoa_report_worker,
+                    NULL, NULL, NULL,
+                    SYNC_TASK_PRIORITY, 0, K_NO_WAIT);
+    tdoa_report_thread_started = true;
 }
 
 static size_t count_expected_blink_reports(void)
@@ -114,12 +227,12 @@ static uint32_t expected_blink_report_timeout_ms(void)
 static void finish_blink_report_collection_locked(bool timed_out)
 {
     uint64_t earliest_ts = 0;
-
-    printf("TDOA blink %u reports %u/%u%s\n",
-           blink_report_collection_id,
-           (unsigned int)blink_report_count,
-           (unsigned int)blink_report_expected_count,
-           timed_out ? " timeout" : "");
+    struct tdoa_report_event event = {
+        .blink_id = blink_report_collection_id,
+        .expected_count = (uint8_t)blink_report_expected_count,
+        .count = (uint8_t)blink_report_count,
+        .timed_out = timed_out,
+    };
 
     for(size_t i=0; i<blink_report_count; i++) {
         if(i == 0 ||
@@ -132,12 +245,12 @@ static void finish_blink_report_collection_locked(bool timed_out)
         int64_t dt = timestamp_diff_signed(blink_reports[i].blink_rx_ts, earliest_ts);
         double distance = dt * DWT_TIME_UNITS * SPEED_OF_LIGHT;
 
-        printf(" report 0x%04x: %.02fm\n",
-               blink_reports[i].reporter_id,
-               distance);
+        event.reporter_id[i] = blink_reports[i].reporter_id;
+        event.distance_m[i] = distance;
     }
 
     blink_report_collection_active = false;
+    publish_tdoa_report_event(&event);
 }
 
 static void blink_report_timeout_handler(struct k_work *work)
@@ -241,6 +354,7 @@ void tdoa_init() {
     tx_msg.header.frame_control = FRAME_CONTROL;
     tx_msg.header.pan_id = MY_PAN_ID;
     tx_msg.header.src_id = get_my_id();
+    start_tdoa_report_thread();
 }
 
 void send_sync() {
@@ -538,4 +652,37 @@ void pdecTdoaStart(void) {
                               SYNC_TASK_PRIORITY, 0, K_NO_WAIT);
     }
 
+}
+
+void start_tdoa_monitor(const struct shell *shell)
+{
+    if (tdoa_monitor_running) {
+        shell_print(shell, "TDOA monitor already running");
+        return;
+    }
+
+    tdoa_monitor_stop_requested = false;
+    tdoa_monitor_running = true;
+    k_msgq_purge(&tdoa_monitor_queue);
+
+    k_thread_create(&tdoa_monitor_thread_data, tdoa_monitor_stack,
+                    K_THREAD_STACK_SIZEOF(tdoa_monitor_stack),
+                    tdoa_monitor,
+                    (void *)shell, NULL, NULL,
+                    SYNC_TASK_PRIORITY, 0, K_NO_WAIT);
+}
+
+void stop_tdoa_monitor(void)
+{
+    struct tdoa_report_event event = {0};
+
+    if (!tdoa_monitor_running) {
+        return;
+    }
+
+    tdoa_monitor_stop_requested = true;
+    if (k_msgq_put(&tdoa_monitor_queue, &event, K_NO_WAIT) != 0) {
+        k_msgq_purge(&tdoa_monitor_queue);
+        (void)k_msgq_put(&tdoa_monitor_queue, &event, K_NO_WAIT);
+    }
 }
