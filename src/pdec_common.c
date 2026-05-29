@@ -1,5 +1,6 @@
 #include"pdec_common.h"
 #include "pdec_database.h"
+#include "pdec_discovery.h"
 #include "pdec_ranging.h"
 #include "pdec_tdoa.h"
 
@@ -29,6 +30,7 @@ enum radio_event_kind {
     RADIO_EVENT_SEND_POLL,
     RADIO_EVENT_SEND_DATA,
     RADIO_EVENT_SEND_SYNC,
+    RADIO_EVENT_SEND_DISCOVERY,
 };
 
 struct radio_event {
@@ -55,11 +57,12 @@ static void cbTxDone(const dwt_cb_data_t *cb_data);
 static void cbRxOk(const dwt_cb_data_t *cb_data);
 static void cbRxTo(const dwt_cb_data_t *cb_data);
 static void cbRxErr(const dwt_cb_data_t *cb_data);
-static void handle_com_msg(const com_msg_t *msg);
+static bool handle_com_msg(const com_msg_t *msg, uint16_t rx_frame_len);
 static void process_rx_ok(void);
 static void send_data_msg_now(uint16_t dst_id, uint8_t* buffer, uint8_t len);
 void send_poll_now(uint16_t dst_id, bool double_sided);
 void send_sync_now(void);
+void send_discovery_now(void);
 
 
 dwt_config_t config = {
@@ -155,6 +158,9 @@ static void radio_thread(void *p1, void *p2, void *p3)
         case RADIO_EVENT_SEND_SYNC:
             send_sync_now();
             break;
+        case RADIO_EVENT_SEND_DISCOVERY:
+            send_discovery_now();
+            break;
         }
     }
 }
@@ -200,16 +206,16 @@ static void cbTxDone(const dwt_cb_data_t *cb_data) {
     (void)submit_radio_event(&event);
 }
 
-static void handle_com_msg(const com_msg_t *msg)
+static bool handle_com_msg(const com_msg_t *msg, uint16_t rx_frame_len)
 {
     uint8_t len = msg->len;
 
-    if (len > PAYLOAD_FRAME_LEN_MAX) {
-        len = PAYLOAD_FRAME_LEN_MAX;
+    if (len > PAYLOAD_FRAME_LEN_MAX || rx_frame_len < COM_MSG_SIZE(len)) {
+        return true;
     }
 
     publish_com_event(msg->header.src_id, msg->payload, len);
-    pdec_radio_restart_rx();
+    return true;
 }
 
 
@@ -220,6 +226,7 @@ static void handle_com_msg(const com_msg_t *msg)
 static void process_rx_ok(void)
 {
     uint8_t rng;
+    bool restart_rx = false;
     
     dwt_writesysstatuslo(DWT_INT_RXFCG_BIT_MASK);
     uint16_t frame_len = dwt_getframelength(&rng);
@@ -240,6 +247,8 @@ static void process_rx_ok(void)
         return;
     }
 
+    touch_device(header->src_id);
+
     // Read carrier integrator value and calculate clock offset ratio.
     double clockOffsetRatio = ((float)dwt_readclockoffset()) / (uint32_t)(1 << 26);
     set_clock_offset(header->src_id, clockOffsetRatio);
@@ -247,36 +256,79 @@ static void process_rx_ok(void)
     switch (header->frame_role)
     {
     case DF_SS_RANGING_POLL:
+        if (frame_len < sizeof(poll_msg_t)) {
+            restart_rx = true;
+            break;
+        }
         handle_poll_msg((poll_msg_t*)header, false);
         break;
     case DF_DS_RANGING_POLL:
+        if (frame_len < sizeof(poll_msg_t)) {
+            restart_rx = true;
+            break;
+        }
         handle_poll_msg((poll_msg_t*)header, true);
         break;
     case DF_SS_RANGING_RESP:
+        if (frame_len < sizeof(resp_msg_t)) {
+            restart_rx = true;
+            break;
+        }
         handle_resp_msg((resp_msg_t*)header, false);
         break;
     case DF_DS_RANGING_RESP:
+        if (frame_len < sizeof(resp_msg_t)) {
+            restart_rx = true;
+            break;
+        }
         handle_resp_msg((resp_msg_t*)header, true);
         break;
     case DF_DS_RANGING_FINAL:
+        if (frame_len < sizeof(final_msg_t)) {
+            restart_rx = true;
+            break;
+        }
         handle_final_msg((final_msg_t*)header);
         break;
     case DF_TDOA_SYNC:
-        handle_sync_msg((sync_msg_t*)header);
+        if (frame_len < sizeof(sync_msg_t)) {
+            restart_rx = true;
+            break;
+        }
+        restart_rx = handle_sync_msg((sync_msg_t*)header);
         break;
     case DF_TDOA_BLINK:
-        handle_blink_msg((blink_msg_t*)header);
+        if (frame_len < sizeof(blink_msg_t)) {
+            restart_rx = true;
+            break;
+        }
+        restart_rx = handle_blink_msg((blink_msg_t*)header);
         break;
     case DF_TDOA_BLINK_REPORT:
-        handle_blink_report_msg((blink_report_msg_t*)header);
+        if (frame_len < sizeof(blink_report_msg_t)) {
+            restart_rx = true;
+            break;
+        }
+        restart_rx = handle_blink_report_msg((blink_report_msg_t*)header);
         //printf("BLINK REPORT\n");
         break;
     case DF_COM_MSG:
-        handle_com_msg(&rx_msg.com);
+        restart_rx = handle_com_msg(&rx_msg.com, frame_len);
+        break;
+    case DF_DISCOVERY_HELLO:
+        if (frame_len < sizeof(discovery_msg_t)) {
+            restart_rx = true;
+            break;
+        }
+        restart_rx = handle_discovery_msg(&rx_msg.discovery);
         break;
     default:
-        pdec_radio_restart_rx();
+        restart_rx = true;
         break;
+    }
+
+    if (restart_rx) {
+        pdec_radio_restart_rx();
     }
 }
 
@@ -329,6 +381,37 @@ static void send_data_msg_now(uint16_t dst_id, uint8_t* buffer, uint8_t len) {
     frame_seq_nb++;
 }
 
+void send_discovery_now(void)
+{
+    discovery_msg_t msg;
+
+    msg.header.frame_control = FRAME_CONTROL;
+    msg.header.seq_number = frame_seq_nb;
+    msg.header.pan_id = MY_PAN_ID;
+    msg.header.dst_id = BROADCAST_ID;
+    msg.header.src_id = get_my_id();
+    msg.header.frame_role = DF_DISCOVERY_HELLO;
+    msg.protocol_version = 1;
+    msg.tdoa_role = (uint8_t)pdecTdoaGetRole();
+
+    dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
+    dwt_writetxdata(sizeof(msg), (uint8_t *)&msg, 0);
+    dwt_writetxfctrl(sizeof(msg), 0, 0);
+
+    dwt_forcetrxoff();
+    dwt_writesysstatuslo(DWT_INT_RX | DWT_INT_TXFRS_BIT_MASK);
+
+    dwt_setrxaftertxdelay(0);
+    dwt_setrxtimeout(0);
+    int ret = dwt_starttx(DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED);
+    if (ret != DWT_SUCCESS) {
+        pdec_radio_restart_rx();
+        return;
+    }
+
+    frame_seq_nb++;
+}
+
 void pdec_radio_restart_rx(void)
 {
     dwt_setrxtimeout(0);
@@ -370,6 +453,15 @@ int pdec_radio_submit_sync(void)
 {
     struct radio_event event = {
         .kind = RADIO_EVENT_SEND_SYNC,
+    };
+
+    return submit_radio_event(&event);
+}
+
+int pdec_radio_submit_discovery(void)
+{
+    struct radio_event event = {
+        .kind = RADIO_EVENT_SEND_DISCOVERY,
     };
 
     return submit_radio_event(&event);

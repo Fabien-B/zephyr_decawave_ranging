@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdbool.h>
+
 #include "pdec_common.h"
 
 typedef enum {
@@ -10,7 +12,9 @@ typedef enum {
 } tdoa_role_t;
 
 void send_sync();
-void handle_sync_msg(sync_msg_t* msg);
-void handle_blink_msg(blink_msg_t* msg);
-void handle_blink_report_msg(blink_report_msg_t* msg);
-void pdecTdoaStart(tdoa_role_t role);
+bool handle_sync_msg(sync_msg_t* msg);
+bool handle_blink_msg(blink_msg_t* msg);
+bool handle_blink_report_msg(blink_report_msg_t* msg);
+tdoa_role_t pdecTdoaGetRole(void);
+void pdecTdoaSetRole(tdoa_role_t role);
+void pdecTdoaStart(void);

@@ -8,6 +8,7 @@ target_sources(app PRIVATE
     src/app_print.c
     src/main.c
     src/pdec_common.c
+    src/pdec_discovery.c
     src/pdec_initiator.c
     src/pdec_database.c
     src/pdec_ranging.c

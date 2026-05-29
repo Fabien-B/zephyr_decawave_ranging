@@ -14,6 +14,7 @@
 #include <dw3000_hw.h>
 
 #include "pdec_common.h"
+#include "pdec_discovery.h"
 #include "pdec_initiator.h"
 #include "pdec_tdoa.h"
 
@@ -83,21 +84,21 @@ int main(void)
 	gpio_pin_configure_dt(&jp3, GPIO_INPUT);
 	gpio_pin_configure_dt(&jp4, GPIO_INPUT);
 
-
 	int j1 = gpio_pin_get_dt(&jp1);
 	int j2 = gpio_pin_get_dt(&jp2);
-	// int j3 = gpio_pin_get_dt(&jp3);
-	// int j4 = gpio_pin_get_dt(&jp4);
+	if (j1 < 0) {
+		j1 = 0;
+	}
+	if (j2 < 0) {
+		j2 = 0;
+	}
 
-	printf("j1: %d,  j2: %d\n", j1, j2);
-
-	tdoa_role_t role = (tdoa_role_t) (j2 << 1) | (j1 << 0);
+	tdoa_role_t role = (tdoa_role_t)((j2 << 1) | j1);
 	printf("Starts TDOA role: %d\n", role);
+	pdecTdoaSetRole(role);
+	pdecTdoaStart();
 
-	//pdecInitiatorStart();
-
-	pdecTdoaStart(role);
-
+	pdec_discovery_start();
 
 	ble_init();
 

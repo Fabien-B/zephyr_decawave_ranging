@@ -1,6 +1,8 @@
 #pragma once
 #include <inttypes.h>
 
+#define PDEC_DEVICE_ROLE_UNKNOWN 0xff
+
 /**
  * @brief Find the internal index of a device by its ID.
  * 
@@ -16,6 +18,37 @@ int get_device_index(uint16_t id);
  * @return The 16-bit device ID, or 0 if index is out of bounds or empty.
  */
 uint16_t get_device_id(int index);
+
+/**
+ * @brief Add a device ID to the global devices list.
+ *
+ * @param id The 16-bit short address of the device.
+ * @return The index where the device was added, or -1 if the list is full.
+ */
+int add_device(uint16_t id);
+
+/**
+ * @brief Refresh the last-seen timestamp for a device.
+ *
+ * @param id 16-bit device short address.
+ */
+void touch_device(uint16_t id);
+
+/**
+ * @brief Store the advertised TDOA role for a device.
+ *
+ * @param id 16-bit device short address.
+ * @param role TDOA role value, or PDEC_DEVICE_ROLE_UNKNOWN.
+ */
+void set_device_tdoa_role(uint16_t id, uint8_t role);
+
+/**
+ * @brief Get the last advertised TDOA role for a device.
+ *
+ * @param id 16-bit device short address.
+ * @return TDOA role value, or PDEC_DEVICE_ROLE_UNKNOWN if unknown.
+ */
+uint8_t get_device_tdoa_role(uint16_t id);
 
 /**
  * @brief Store the measured clock offset ratio for a specific device.

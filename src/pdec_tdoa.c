@@ -18,14 +18,20 @@
 
 #define SYNC_DELAY 2000  //us
 #define SYNC_SLOT_TIME 5000  //us
+#define SYNC_PERIOD_MS 1000
+#define SYNC_PER_BEACON_RANGE 10
 
 
 #define SYNC_TASK_STACK_SIZE 1000
 #define SYNC_TASK_PRIORITY 5
+#define SYNC_EVENT_STOP BIT(0)
+
 K_THREAD_STACK_DEFINE(sync_stack_area, SYNC_TASK_STACK_SIZE);
+K_EVENT_DEFINE(sync_events);
 struct k_thread sync_thread_data;
 
 static tdoa_role_t tdoa_role;
+static bool sync_thread_active;
 
 uint64_t _master_blink_rx_ts = 0;
 
@@ -47,6 +53,17 @@ double alpha = 1;
 int64_t beta = 0;
 
 uint16_t master_id = 0;
+
+static void pdec_sync_mark_stopped(void)
+{
+    sync_thread_active = false;
+    k_event_clear(&sync_events, SYNC_EVENT_STOP);
+}
+
+static bool pdec_sync_wait_or_stop(k_timeout_t timeout)
+{
+    return (k_event_wait(&sync_events, SYNC_EVENT_STOP, false, timeout) & SYNC_EVENT_STOP) != 0;
+}
 
 void tdoa_init() {
     tx_msg.header.frame_control = FRAME_CONTROL;
@@ -108,10 +125,11 @@ void send_sync_now() {
 
 
 
-void handle_sync_msg(sync_msg_t* msg) {
-    if(tdoa_role == TDOA_ROLE_NONE) {
-        pdec_radio_restart_rx();
-        return;
+bool handle_sync_msg(sync_msg_t* msg) {
+    tdoa_role_t role = pdecTdoaGetRole();
+
+    if(role == TDOA_ROLE_NONE) {
+        return true;
     }
 
     uint64_t sync_rx_ts = get_rx_timestamp_u64();
@@ -133,10 +151,10 @@ void handle_sync_msg(sync_msg_t* msg) {
 
     ////////////////////////////////////////////////////////////////////
     
-    if(tdoa_role != TDOA_ROLE_BLINKER) {
+    if(role != TDOA_ROLE_BLINKER) {
         // beacons just wait for a BLINK or an other SYNC
         status = POLLING;
-        pdec_radio_restart_rx();
+        return true;
     } else {
         // BLINKER will send a BLINK soon (first time slot after SYNC)
 
@@ -169,8 +187,9 @@ void handle_sync_msg(sync_msg_t* msg) {
             // Increment frame sequence number after transmission of the poll message (modulo 256).
             frame_seq_nb++;
             blink_seq_nb++;
+            return false;
         } else {
-            pdec_radio_restart_rx();
+            return true;
         }
     }
 
@@ -178,10 +197,11 @@ void handle_sync_msg(sync_msg_t* msg) {
 }
 
 
-void handle_blink_msg(blink_msg_t* msg) {
-    if(tdoa_role == TDOA_ROLE_NONE) {
-        pdec_radio_restart_rx();
-        return;
+bool handle_blink_msg(blink_msg_t* msg) {
+    tdoa_role_t role = pdecTdoaGetRole();
+
+    if(role == TDOA_ROLE_NONE) {
+        return true;
     }
 
     last_blink_id = msg->blink_id;
@@ -189,12 +209,11 @@ void handle_blink_msg(blink_msg_t* msg) {
     bool plop = false;
     int64_t blink_rx_ts = get_rx_timestamp_u64();
     
-    if(tdoa_role == TDOA_ROLE_MASTER) {
+    if(role == TDOA_ROLE_MASTER) {
         // the master does not need to report
         _master_blink_rx_ts = blink_rx_ts;
         status = POLLING;
-        pdec_radio_restart_rx();
-        return;
+        return true;
     }
     
 
@@ -243,19 +262,21 @@ void handle_blink_msg(blink_msg_t* msg) {
     {
         // Increment frame sequence number after transmission of the poll message (modulo 256).
         frame_seq_nb++;
+        return false;
     } else {
-        pdec_radio_restart_rx();
+        return true;
     }
 }
 
-void handle_blink_report_msg(blink_report_msg_t* msg) {
-    if(tdoa_role == TDOA_ROLE_NONE) {
-        pdec_radio_restart_rx();
-        return;
+bool handle_blink_report_msg(blink_report_msg_t* msg) {
+    tdoa_role_t role = pdecTdoaGetRole();
+
+    if(role == TDOA_ROLE_NONE) {
+        return true;
     }
 
     // only the master process blik reports
-    if(tdoa_role == TDOA_ROLE_MASTER) {
+    if(role == TDOA_ROLE_MASTER) {
         if(msg->blink_id == last_blink_id) {
             int64_t dt = timestamp_diff_signed(_master_blink_rx_ts, msg->blink_rx_ts) ;
             double distance = dt * DWT_TIME_UNITS * SPEED_OF_LIGHT;
@@ -266,46 +287,98 @@ void handle_blink_report_msg(blink_report_msg_t* msg) {
 
     status = POLLING;
     // dwt_setrxaftertxdelay(0);
-    pdec_radio_restart_rx();
+    return true;
 }
 
 static void pdec_sync_task(void *, void *, void *) {
-    // do a few ranging before static TDOA
+    int sync_count = 0;
+    int next_beacon_index = 0;
+
+    // Do a few ranging rounds with known TDOA beacons before starting sync.
     for(int i=0; i<10; i++) {
+        if(pdec_sync_wait_or_stop(K_NO_WAIT)) {
+            pdec_sync_mark_stopped();
+            return;
+        }
+
         for(int j=0; get_device_id(j) != 0; j++) {
             uint16_t dev_id = get_device_id(j);
-            if(dev_id != get_my_id()) {
+            if(dev_id != get_my_id() &&
+               get_device_tdoa_role(dev_id) == TDOA_ROLE_BEACON) {
                 send_poll(dev_id, true);
-                k_msleep(100);
+                if(pdec_sync_wait_or_stop(K_MSEC(100))) {
+                    pdec_sync_mark_stopped();
+                    return;
+                }
             }
         }
-    
-    }
-    // Then a few SYNCs
-    for(int i=0; i<10; i++) {
-        send_sync();
-        k_msleep(100);
     }
 
-    // then BLINK
-    while(true) {
-        for(int i=0;i<10; i++) {
-             send_sync();
-             k_msleep(1000);
+    // Periodically send sync while this node remains the active master.
+    while(!pdec_sync_wait_or_stop(K_NO_WAIT)) {
+        send_sync();
+        sync_count++;
+        if(pdec_sync_wait_or_stop(K_MSEC(SYNC_PERIOD_MS))) {
+            break;
+        }
+
+        if(sync_count >= SYNC_PER_BEACON_RANGE) {
+            bool ranged = false;
+
+            // Range one beacon between sync bursts so new or moved beacons are folded in.
+            for(int searched=0; searched < 10; searched++) {
+                if(get_device_id(next_beacon_index) == 0) {
+                    next_beacon_index = 0;
+                }
+
+                int j = next_beacon_index++;
+                uint16_t dev_id = get_device_id(j);
+                if(dev_id != get_my_id() &&
+                   get_device_tdoa_role(dev_id) == TDOA_ROLE_BEACON) {
+                    send_poll(dev_id, true);
+                    if(pdec_sync_wait_or_stop(K_MSEC(100))) {
+                        break;
+                    }
+                    ranged = true;
+                    break;
+                }
+            }
+
+            if(ranged) {
+                sync_count = 0;
+            }
         }
     }
+
+    pdec_sync_mark_stopped();
 }
 
-void pdecTdoaStart(tdoa_role_t role) {
-    
+tdoa_role_t pdecTdoaGetRole(void)
+{
+    return tdoa_role;
+}
+
+void pdecTdoaSetRole(tdoa_role_t role)
+{
+    if(tdoa_role == TDOA_ROLE_MASTER && role != TDOA_ROLE_MASTER) {
+        k_event_post(&sync_events, SYNC_EVENT_STOP);
+    }
+
     tdoa_role = role;
 
-    if(role == TDOA_ROLE_MASTER) {
-        k_tid_t my_tid = k_thread_create(&sync_thread_data, sync_stack_area,
-                                         K_THREAD_STACK_SIZEOF(sync_stack_area),
-                                         pdec_sync_task,
-                                         NULL, NULL, NULL,
-                                         SYNC_TASK_PRIORITY, 0, K_NO_WAIT);
+    set_device_tdoa_role(get_my_id(), (uint8_t)role);
+}
+
+void pdecTdoaStart(void) {
+    if(tdoa_role == TDOA_ROLE_MASTER && !sync_thread_active) {
+        sync_thread_active = true;
+        k_event_clear(&sync_events, SYNC_EVENT_STOP);
+
+        (void)k_thread_create(&sync_thread_data, sync_stack_area,
+                              K_THREAD_STACK_SIZEOF(sync_stack_area),
+                              pdec_sync_task,
+                              NULL, NULL, NULL,
+                              SYNC_TASK_PRIORITY, 0, K_NO_WAIT);
     }
 
 }

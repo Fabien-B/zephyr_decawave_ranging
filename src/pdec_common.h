@@ -69,6 +69,13 @@ typedef struct __attribute__((packed)) {
     uint16_t chk;   // checksum automatically set by DW IC
 } blink_report_msg_t;
 
+typedef struct __attribute__((packed)) {
+    frame_header_t header;
+    uint8_t protocol_version;
+    uint8_t tdoa_role;
+    uint16_t chk;   // checksum automatically set by DW IC
+} discovery_msg_t;
+
 #define COM_MSG_SIZE(len) (len + sizeof(frame_header_t) + 1 + 3)
 
 typedef struct __attribute__((packed)) {
@@ -89,6 +96,7 @@ union ranging_msg_u
     sync_msg_t sync;
     blink_msg_t blink;
     blink_report_msg_t blink_report;
+    discovery_msg_t discovery;
 
     com_msg_t com;
 };
@@ -113,6 +121,7 @@ typedef enum {
     DF_TDOA_BLINK = 0xE6,
     DF_TDOA_BLINK_REPORT = 0xE7,
     DF_COM_MSG = 0xE8,
+    DF_DISCOVERY_HELLO = 0xE9,
 } frame_role_t;
 
 
@@ -132,6 +141,7 @@ void send_data_msg(uint16_t dst_id, uint8_t* buffer, uint8_t len);
 int pdec_radio_submit_poll(uint16_t dst_id, bool double_sided);
 int pdec_radio_submit_data(uint16_t dst_id, const uint8_t *buffer, uint8_t len);
 int pdec_radio_submit_sync(void);
+int pdec_radio_submit_discovery(void);
 void pdec_radio_restart_rx(void);
 
 // frame control:

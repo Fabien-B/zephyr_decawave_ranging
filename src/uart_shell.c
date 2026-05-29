@@ -10,6 +10,7 @@
 
 #include "pdec_common.h"
 #include "pdec_initiator.h"
+#include "pdec_tdoa.h"
 #include "uart_protocol.h"
 #include "pdec_ranging.h"
 #include "pdec_database.h"
@@ -223,6 +224,22 @@ static int cmd_ranging_monitor(const struct shell *sh, size_t argc, char **argv)
     return 0;
 }
 
+static const char *tdoa_role_label(uint8_t role)
+{
+    switch (role) {
+    case TDOA_ROLE_NONE:
+        return "none";
+    case TDOA_ROLE_BEACON:
+        return "beacon";
+    case TDOA_ROLE_BLINKER:
+        return "blinker";
+    case TDOA_ROLE_MASTER:
+        return "master";
+    default:
+        return "unknown";
+    }
+}
+
 static int cmd_ranging_list(const struct shell *sh, size_t argc, char **argv)
 {
     ARG_UNUSED(argc);
@@ -231,7 +248,9 @@ static int cmd_ranging_list(const struct shell *sh, size_t argc, char **argv)
     shell_print(sh, "Known devices:");
     for (int i = 0; get_device_id(i) != 0; i++) {
         uint16_t id = get_device_id(i);
-        shell_print(sh, " [%d] 0x%04x %s", i, id, (id == get_my_id()) ? "(me)" : "");
+        shell_print(sh, " [%d] 0x%04x role=%s %s", i, id,
+                    tdoa_role_label(get_device_tdoa_role(id)),
+                    (id == get_my_id()) ? "(me)" : "");
     }
     return 0;
 }
