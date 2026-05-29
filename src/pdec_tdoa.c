@@ -20,6 +20,8 @@
 #define SYNC_SLOT_TIME 5000  //us
 #define SYNC_PERIOD_MS 1000
 #define SYNC_PER_BEACON_RANGE 10
+#define BLINK_REPORT_TIMEOUT_MARGIN_MS 10
+#define BLINK_REPORTS_MAX 10
 
 
 #define SYNC_TASK_STACK_SIZE 1000
@@ -53,6 +55,164 @@ double alpha = 1;
 int64_t beta = 0;
 
 uint16_t master_id = 0;
+
+struct blink_report_entry {
+    uint16_t reporter_id;
+    uint64_t blink_rx_ts;
+};
+
+static K_MUTEX_DEFINE(blink_report_lock);
+static void blink_report_timeout_handler(struct k_work *work);
+K_WORK_DELAYABLE_DEFINE(blink_report_timeout_work, blink_report_timeout_handler);
+
+static bool blink_report_collection_active;
+static uint32_t blink_report_collection_id;
+static uint16_t blink_report_sender_id;
+static size_t blink_report_expected_count;
+static size_t blink_report_count;
+static struct blink_report_entry blink_reports[BLINK_REPORTS_MAX];
+
+static bool tdoa_role_reports_blinks(tdoa_role_t role)
+{
+    return role == TDOA_ROLE_BEACON || role == TDOA_ROLE_MASTER;
+}
+
+static size_t count_expected_blink_reports(void)
+{
+    size_t count = 0;
+
+    for(int i=0; get_device_id(i) != 0; i++) {
+        uint16_t dev_id = get_device_id(i);
+        if(dev_id != get_my_id() &&
+           tdoa_role_reports_blinks(get_device_tdoa_role(dev_id))) {
+            count++;
+        }
+    }
+
+    return count;
+}
+
+static uint32_t expected_blink_report_timeout_ms(void)
+{
+    uint8_t max_tdoa_index = 0;
+
+    for(int i=0; get_device_id(i) != 0; i++) {
+        uint16_t dev_id = get_device_id(i);
+        if(dev_id != get_my_id() &&
+           tdoa_role_reports_blinks(get_device_tdoa_role(dev_id))) {
+            uint8_t tdoa_index = get_tdoa_index(dev_id);
+            if(tdoa_index != 255 && tdoa_index > max_tdoa_index) {
+                max_tdoa_index = tdoa_index;
+            }
+        }
+    }
+
+    return (uint32_t)(((uint64_t)SYNC_SLOT_TIME * (max_tdoa_index + 1)) / 1000)
+         + BLINK_REPORT_TIMEOUT_MARGIN_MS;
+}
+
+static void finish_blink_report_collection_locked(bool timed_out)
+{
+    printf("TDOA blink %u reports %u/%u%s\n",
+           blink_report_collection_id,
+           (unsigned int)blink_report_count,
+           (unsigned int)blink_report_expected_count,
+           timed_out ? " timeout" : "");
+
+    for(size_t i=0; i<blink_report_count; i++) {
+        printf(" report 0x%04x: %" PRIu64 "\n",
+               blink_reports[i].reporter_id,
+               blink_reports[i].blink_rx_ts);
+    }
+
+    blink_report_collection_active = false;
+}
+
+static void blink_report_timeout_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+
+    k_mutex_lock(&blink_report_lock, K_FOREVER);
+    if(blink_report_collection_active) {
+        finish_blink_report_collection_locked(true);
+    }
+    k_mutex_unlock(&blink_report_lock);
+}
+
+static void start_blink_report_collection(uint32_t blink_id)
+{
+    uint32_t timeout_ms;
+
+    k_mutex_lock(&blink_report_lock, K_FOREVER);
+
+    blink_report_collection_active = true;
+    blink_report_collection_id = blink_id;
+    blink_report_sender_id = get_my_id();
+    blink_report_expected_count = count_expected_blink_reports();
+    blink_report_count = 0;
+
+    if(blink_report_expected_count == 0) {
+        blink_report_collection_active = false;
+        k_mutex_unlock(&blink_report_lock);
+        return;
+    }
+
+    timeout_ms = expected_blink_report_timeout_ms();
+    k_mutex_unlock(&blink_report_lock);
+
+    k_work_reschedule(&blink_report_timeout_work, K_MSEC(timeout_ms));
+}
+
+static void collect_blink_report(const blink_report_msg_t *msg)
+{
+    bool complete = false;
+
+    if(msg->blink_snd_id != get_my_id() ||
+       !tdoa_role_reports_blinks(get_device_tdoa_role(msg->header.src_id))) {
+        return;
+    }
+
+    k_mutex_lock(&blink_report_lock, K_FOREVER);
+
+    if(!blink_report_collection_active ||
+       msg->blink_id != blink_report_collection_id ||
+       msg->blink_snd_id != blink_report_sender_id) {
+        k_mutex_unlock(&blink_report_lock);
+        return;
+    }
+
+    for(size_t i=0; i<blink_report_count; i++) {
+        if(blink_reports[i].reporter_id == msg->header.src_id) {
+            blink_reports[i].blink_rx_ts = msg->blink_rx_ts;
+            complete = blink_report_count >= blink_report_expected_count;
+            if(complete) {
+                finish_blink_report_collection_locked(false);
+            }
+            k_mutex_unlock(&blink_report_lock);
+            if(complete) {
+                (void)k_work_cancel_delayable(&blink_report_timeout_work);
+            }
+            return;
+        }
+    }
+
+    if(blink_report_count < ARRAY_SIZE(blink_reports)) {
+        blink_reports[blink_report_count].reporter_id = msg->header.src_id;
+        blink_reports[blink_report_count].blink_rx_ts = msg->blink_rx_ts;
+        blink_report_count++;
+    }
+
+    complete = blink_report_count >= blink_report_expected_count;
+    if(complete) {
+        finish_blink_report_collection_locked(false);
+    }
+
+    k_mutex_unlock(&blink_report_lock);
+
+    if(complete) {
+        (void)k_work_cancel_delayable(&blink_report_timeout_work);
+    }
+}
 
 static void pdec_sync_mark_stopped(void)
 {
@@ -186,6 +346,7 @@ bool handle_sync_msg(sync_msg_t* msg) {
         {
             // Increment frame sequence number after transmission of the poll message (modulo 256).
             frame_seq_nb++;
+            start_blink_report_collection(tx_msg.blink.blink_id);
             blink_seq_nb++;
             return false;
         } else {
@@ -263,19 +424,11 @@ bool handle_blink_msg(blink_msg_t* msg) {
 bool handle_blink_report_msg(blink_report_msg_t* msg) {
     tdoa_role_t role = pdecTdoaGetRole();
 
-    if(role == TDOA_ROLE_NONE) {
+    if(role != TDOA_ROLE_BLINKER) {
         return true;
     }
 
-    // only the master process blik reports
-    if(role == TDOA_ROLE_MASTER) {
-        if(msg->blink_id == last_blink_id) {
-            int64_t dt = timestamp_diff_signed(_master_blink_rx_ts, msg->blink_rx_ts) ;
-            double distance = dt * DWT_TIME_UNITS * SPEED_OF_LIGHT;
-            ARG_UNUSED(distance);
-        }
-    }
-
+    collect_blink_report(msg);
 
     status = POLLING;
     // dwt_setrxaftertxdelay(0);
