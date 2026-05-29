@@ -206,28 +206,20 @@ bool handle_blink_msg(blink_msg_t* msg) {
 
     last_blink_id = msg->blink_id;
 
-    bool plop = false;
     int64_t blink_rx_ts = get_rx_timestamp_u64();
-    
+    int64_t blink_ts_master = blink_rx_ts;
+
+    if(role != TDOA_ROLE_MASTER) {
+        blink_ts_master = blink_rx_ts - beta;
+        if(blink_ts_master < 0) {
+            blink_ts_master += (int64_t)1<<40;
+        }
+        blink_ts_master /= alpha;
+    }
+
     if(role == TDOA_ROLE_MASTER) {
-        // the master does not need to report
         _master_blink_rx_ts = blink_rx_ts;
-        status = POLLING;
-        return true;
     }
-    
-
-    
-    // double distance = get_distance(get_my_id(), master_id);
-    // int64_t dt = distance / (SPEED_OF_LIGHT*DWT_TIME_UNITS);
-    
-    int64_t blink_ts_master = (blink_rx_ts - (beta));
-    if(blink_ts_master < 0) {
-        blink_ts_master += (int64_t)1<<40;
-        plop = true;
-    }
-
-    blink_ts_master /= alpha;
 
     tx_msg.header.frame_control = FRAME_CONTROL;
     tx_msg.header.frame_role = DF_TDOA_BLINK_REPORT;
