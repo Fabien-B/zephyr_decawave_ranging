@@ -99,7 +99,9 @@ static struct blink_report_entry blink_reports[BLINK_REPORTS_MAX];
 
 static bool tdoa_role_reports_blinks(tdoa_role_t role)
 {
-    return role == TDOA_ROLE_BEACON || role == TDOA_ROLE_MASTER;
+    return role == TDOA_ROLE_BLINKER ||
+           role == TDOA_ROLE_BEACON ||
+           role == TDOA_ROLE_MASTER;
 }
 
 static void publish_tdoa_report_event(struct tdoa_report_event *event)
@@ -190,13 +192,13 @@ static void start_tdoa_report_thread(void)
     tdoa_report_thread_started = true;
 }
 
-static size_t count_expected_blink_reports(void)
+static size_t count_expected_blink_reports(uint16_t blink_sender_id)
 {
     size_t count = 0;
 
     for(int i=0; get_device_id(i) != 0; i++) {
         uint16_t dev_id = get_device_id(i);
-        if(dev_id != get_my_id() &&
+        if(dev_id != blink_sender_id &&
            tdoa_role_reports_blinks(get_device_tdoa_role(dev_id))) {
             count++;
         }
@@ -205,13 +207,13 @@ static size_t count_expected_blink_reports(void)
     return count;
 }
 
-static uint32_t expected_blink_report_timeout_ms(void)
+static uint32_t expected_blink_report_timeout_ms(uint16_t blink_sender_id)
 {
     uint8_t max_tdoa_index = 0;
 
     for(int i=0; get_device_id(i) != 0; i++) {
         uint16_t dev_id = get_device_id(i);
-        if(dev_id != get_my_id() &&
+        if(dev_id != blink_sender_id &&
            tdoa_role_reports_blinks(get_device_tdoa_role(dev_id))) {
             uint8_t tdoa_index = get_tdoa_index(dev_id);
             if(tdoa_index != 255 && tdoa_index > max_tdoa_index) {
@@ -220,7 +222,7 @@ static uint32_t expected_blink_report_timeout_ms(void)
         }
     }
 
-    return (uint32_t)(((uint64_t)SYNC_SLOT_TIME * (max_tdoa_index + 1)) / 1000)
+    return (uint32_t)((((uint64_t)SYNC_SLOT_TIME * (max_tdoa_index + 2)) + 999) / 1000)
          + BLINK_REPORT_TIMEOUT_MARGIN_MS;
 }
 
@@ -264,7 +266,7 @@ static void blink_report_timeout_handler(struct k_work *work)
     k_mutex_unlock(&blink_report_lock);
 }
 
-static void start_blink_report_collection(uint32_t blink_id)
+static void start_blink_report_collection(uint32_t blink_id, uint16_t blink_sender_id)
 {
     uint32_t timeout_ms;
 
@@ -272,62 +274,57 @@ static void start_blink_report_collection(uint32_t blink_id)
 
     blink_report_collection_active = true;
     blink_report_collection_id = blink_id;
-    blink_report_sender_id = get_my_id();
-    blink_report_expected_count = count_expected_blink_reports();
+    blink_report_sender_id = blink_sender_id;
+    blink_report_expected_count = count_expected_blink_reports(blink_sender_id);
     blink_report_count = 0;
 
     if(blink_report_expected_count == 0) {
-        blink_report_collection_active = false;
+        finish_blink_report_collection_locked(false);
         k_mutex_unlock(&blink_report_lock);
         return;
     }
 
-    timeout_ms = expected_blink_report_timeout_ms();
+    timeout_ms = expected_blink_report_timeout_ms(blink_sender_id);
     k_mutex_unlock(&blink_report_lock);
 
     k_work_reschedule(&blink_report_timeout_work, K_MSEC(timeout_ms));
 }
 
-static void collect_blink_report(const blink_report_msg_t *msg)
+static bool store_blink_report_locked(uint16_t reporter_id, uint64_t blink_rx_ts)
+{
+    for(size_t i=0; i<blink_report_count; i++) {
+        if(blink_reports[i].reporter_id == reporter_id) {
+            blink_reports[i].blink_rx_ts = blink_rx_ts;
+            return blink_report_count >= blink_report_expected_count;
+        }
+    }
+
+    if(blink_report_count < ARRAY_SIZE(blink_reports)) {
+        blink_reports[blink_report_count].reporter_id = reporter_id;
+        blink_reports[blink_report_count].blink_rx_ts = blink_rx_ts;
+        blink_report_count++;
+    }
+
+    return blink_report_count >= blink_report_expected_count;
+}
+
+static void collect_blink_report(uint32_t blink_id, uint16_t blink_sender_id,
+                                 uint16_t reporter_id, uint64_t blink_rx_ts)
 {
     bool complete = false;
 
-    if(msg->blink_snd_id != get_my_id() ||
-       !tdoa_role_reports_blinks(get_device_tdoa_role(msg->header.src_id))) {
+    if(!tdoa_role_reports_blinks(get_device_tdoa_role(reporter_id))) {
         return;
     }
 
     k_mutex_lock(&blink_report_lock, K_FOREVER);
 
-    if(!blink_report_collection_active ||
-       msg->blink_id != blink_report_collection_id ||
-       msg->blink_snd_id != blink_report_sender_id) {
-        k_mutex_unlock(&blink_report_lock);
-        return;
+    if(blink_report_collection_active &&
+       blink_id == blink_report_collection_id &&
+       blink_sender_id == blink_report_sender_id) {
+        complete = store_blink_report_locked(reporter_id, blink_rx_ts);
     }
 
-    for(size_t i=0; i<blink_report_count; i++) {
-        if(blink_reports[i].reporter_id == msg->header.src_id) {
-            blink_reports[i].blink_rx_ts = msg->blink_rx_ts;
-            complete = blink_report_count >= blink_report_expected_count;
-            if(complete) {
-                finish_blink_report_collection_locked(false);
-            }
-            k_mutex_unlock(&blink_report_lock);
-            if(complete) {
-                (void)k_work_cancel_delayable(&blink_report_timeout_work);
-            }
-            return;
-        }
-    }
-
-    if(blink_report_count < ARRAY_SIZE(blink_reports)) {
-        blink_reports[blink_report_count].reporter_id = msg->header.src_id;
-        blink_reports[blink_report_count].blink_rx_ts = msg->blink_rx_ts;
-        blink_report_count++;
-    }
-
-    complete = blink_report_count >= blink_report_expected_count;
     if(complete) {
         finish_blink_report_collection_locked(false);
     }
@@ -460,8 +457,8 @@ bool handle_sync_msg(sync_msg_t* msg) {
 
         tx_msg.blink.blink_id = blink_seq_nb;
 
-        dwt_writetxdata(sizeof(tx_msg.sync), (uint8_t*)&tx_msg.sync, 0); /* Zero offset in TX buffer. */
-        dwt_writetxfctrl(sizeof(tx_msg.sync), 0, 1);          /* Zero offset in TX buffer, ranging. */
+        dwt_writetxdata(sizeof(tx_msg.blink), (uint8_t*)&tx_msg.blink, 0); /* Zero offset in TX buffer. */
+        dwt_writetxfctrl(sizeof(tx_msg.blink), 0, 1);          /* Zero offset in TX buffer, ranging. */
 
         dwt_setrxaftertxdelay(0);
         dwt_setrxtimeout(0);
@@ -472,7 +469,7 @@ bool handle_sync_msg(sync_msg_t* msg) {
         {
             // Increment frame sequence number after transmission of the poll message (modulo 256).
             frame_seq_nb++;
-            start_blink_report_collection(tx_msg.blink.blink_id);
+            start_blink_report_collection(tx_msg.blink.blink_id, get_my_id());
             blink_seq_nb++;
             return false;
         } else {
@@ -507,6 +504,10 @@ bool handle_blink_msg(blink_msg_t* msg) {
     if(role == TDOA_ROLE_MASTER) {
         _master_blink_rx_ts = blink_rx_ts;
     }
+
+    start_blink_report_collection(msg->blink_id, msg->header.src_id);
+    collect_blink_report(msg->blink_id, msg->header.src_id, get_my_id(),
+                         (uint64_t)blink_ts_master);
 
     tx_msg.header.frame_control = FRAME_CONTROL;
     tx_msg.header.frame_role = DF_TDOA_BLINK_REPORT;
@@ -550,11 +551,12 @@ bool handle_blink_msg(blink_msg_t* msg) {
 bool handle_blink_report_msg(blink_report_msg_t* msg) {
     tdoa_role_t role = pdecTdoaGetRole();
 
-    if(role != TDOA_ROLE_BLINKER) {
+    if(!tdoa_role_reports_blinks(role)) {
         return true;
     }
 
-    collect_blink_report(msg);
+    collect_blink_report(msg->blink_id, msg->blink_snd_id, msg->header.src_id,
+                         msg->blink_rx_ts);
 
     status = POLLING;
     // dwt_setrxaftertxdelay(0);

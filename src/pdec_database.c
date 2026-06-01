@@ -270,7 +270,8 @@ uint8_t get_tdoa_index(uint16_t id) {
     int count = 0;
 
     for (int i = 0; i < NUM_DEVICES_MAX && devices[i] != 0; i++) {
-        if (tdoa_roles[i] == TDOA_ROLE_BEACON ||
+        if (tdoa_roles[i] == TDOA_ROLE_BLINKER ||
+            tdoa_roles[i] == TDOA_ROLE_BEACON ||
             tdoa_roles[i] == TDOA_ROLE_MASTER) {
             if (devices[i] == id) {
                 return (uint8_t)count;
