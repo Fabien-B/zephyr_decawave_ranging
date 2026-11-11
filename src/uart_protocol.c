@@ -15,6 +15,8 @@
 #include "uart_shell.h"
 
 #define UART_DEVICE_NODE DT_CHOSEN(zephyr_console)
+#define USB_DEVICE_NODE DT_NODELABEL(pdec_usb_uart)
+#define USB_TX_RING_SIZE 2048
 
 #define UART_PROTOCOL_SYNC_BYTE 0xFF
 #define UART_PROTOCOL_MODE_SWITCH_MS 1000
@@ -40,6 +42,10 @@ struct binary_parser {
 
 struct uart_protocol_ctx {
     const struct device *uart;
+    enum pdec_serial_port port;
+    struct ring_buf tx_ring;
+    struct k_spinlock tx_lock;
+    uint8_t tx_storage[USB_TX_RING_SIZE];
     struct ring_buf rx_ring;
     struct k_work rx_work;
     enum pdec_uart_mode mode;
@@ -50,98 +56,119 @@ struct uart_protocol_ctx {
     bool last_byte_was_cr;
 };
 
-static struct uart_protocol_ctx uart_protocol = {
-    .last_stray_newline_ms = -1,
-};
+static struct uart_protocol_ctx protocols[PDEC_SERIAL_PORT_COUNT];
 
 static K_MUTEX_DEFINE(uart_tx_lock);
 
-static void uart_protocol_write_unlocked(const uint8_t *data, size_t len)
+static int uart_protocol_write_unlocked(struct uart_protocol_ctx *ctx,
+                                       const uint8_t *data, size_t len)
 {
-    if (uart_protocol.uart == NULL) {
-        return;
+    if (ctx->uart == NULL) {
+        return -ENODEV;
+    }
+
+    if (ctx->port == PDEC_SERIAL_USB) {
+        uint32_t dtr = 0;
+
+        uart_line_ctrl_get(ctx->uart, UART_LINE_CTRL_DTR, &dtr);
+        k_spinlock_key_t key = k_spin_lock(&ctx->tx_lock);
+        if (!dtr) {
+            ring_buf_reset(&ctx->tx_ring);
+            k_spin_unlock(&ctx->tx_lock, key);
+            return -ENOTCONN;
+        }
+        /* Queue complete writes: congestion must never truncate a frame. */
+        if (ring_buf_space_get(&ctx->tx_ring) < len) {
+            k_spin_unlock(&ctx->tx_lock, key);
+            return -ENOSPC;
+        }
+        ring_buf_put(&ctx->tx_ring, data, len);
+        k_spin_unlock(&ctx->tx_lock, key);
+        uart_irq_tx_enable(ctx->uart);
+        return 0;
     }
 
     for (size_t i = 0; i < len; ++i) {
-        uart_poll_out(uart_protocol.uart, data[i]);
+        uart_poll_out(ctx->uart, data[i]);
     }
+    return 0;
 }
 
-static void binary_parser_reset(void)
+static void binary_parser_reset(struct uart_protocol_ctx *ctx)
 {
-    uart_protocol.parser.state = BINARY_RX_SYNC_1;
-    uart_protocol.parser.len = 0;
-    uart_protocol.parser.index = 0;
+    ctx->parser.state = BINARY_RX_SYNC_1;
+    ctx->parser.len = 0;
+    ctx->parser.index = 0;
 }
 
-static void set_mode(enum pdec_uart_mode mode)
+static void set_mode(struct uart_protocol_ctx *ctx, enum pdec_uart_mode mode)
 {
     int ret;
 
     if (mode == PDEC_UART_MODE_ASCII) {
-        ret = pdec_uart_shell_start();
+        ret = pdec_uart_shell_start(ctx->port);
         if (ret < 0 && ret != -EALREADY) {
             return;
         }
     } else {
-        ret = pdec_uart_shell_stop();
+        ret = pdec_uart_shell_stop(ctx->port);
         ARG_UNUSED(ret);
     }
 
-    uart_protocol.mode = mode;
-    uart_protocol.last_stray_newline_ms = -1;
-    uart_protocol.last_byte_was_cr = false;
-    binary_parser_reset();
+    ctx->mode = mode;
+    ctx->last_stray_newline_ms = -1;
+    ctx->last_byte_was_cr = false;
+    binary_parser_reset(ctx);
 
     if (mode != PDEC_UART_MODE_ASCII) {
-        pdec_uart_protocol_write_str("\r\nBinary mode enabled\r\n");
+        pdec_uart_protocol_write_str(ctx->port, "\r\nBinary mode enabled\r\n");
     }
 }
 
-static void maybe_switch_to_ascii(void)
+static void maybe_switch_to_ascii(struct uart_protocol_ctx *ctx)
 {
     int64_t now = k_uptime_get();
 
-    if ((uart_protocol.last_stray_newline_ms >= 0) &&
-        ((now - uart_protocol.last_stray_newline_ms) < UART_PROTOCOL_MODE_SWITCH_MS)) {
-        set_mode(PDEC_UART_MODE_ASCII);
+    if ((ctx->last_stray_newline_ms >= 0) &&
+        ((now - ctx->last_stray_newline_ms) < UART_PROTOCOL_MODE_SWITCH_MS)) {
+        set_mode(ctx, PDEC_UART_MODE_ASCII);
         return;
     }
 
-    uart_protocol.last_stray_newline_ms = now;
+    ctx->last_stray_newline_ms = now;
 }
 
-static bool handle_binary_mode_newline(uint8_t c)
+static bool handle_binary_mode_newline(struct uart_protocol_ctx *ctx, uint8_t c)
 {
-    if (uart_protocol.parser.state != BINARY_RX_SYNC_1 &&
-        uart_protocol.parser.state != BINARY_RX_SYNC_2) {
-        uart_protocol.last_byte_was_cr = false;
+    if (ctx->parser.state != BINARY_RX_SYNC_1 &&
+        ctx->parser.state != BINARY_RX_SYNC_2) {
+        ctx->last_byte_was_cr = false;
         return false;
     }
 
     if (c == '\r') {
-        maybe_switch_to_ascii();
-        uart_protocol.last_byte_was_cr = true;
+        maybe_switch_to_ascii(ctx);
+        ctx->last_byte_was_cr = true;
         return true;
     }
 
     if (c == '\n') {
-        if (uart_protocol.last_byte_was_cr) {
-            uart_protocol.last_byte_was_cr = false;
+        if (ctx->last_byte_was_cr) {
+            ctx->last_byte_was_cr = false;
             return true;
         }
 
-        maybe_switch_to_ascii();
+        maybe_switch_to_ascii(ctx);
         return true;
     }
 
-    uart_protocol.last_byte_was_cr = false;
+    ctx->last_byte_was_cr = false;
     return false;
 }
 
-static void handle_binary_frame_byte(uint8_t c)
+static void handle_binary_frame_byte(struct uart_protocol_ctx *ctx, uint8_t c)
 {
-    struct binary_parser *parser = &uart_protocol.parser;
+    struct binary_parser *parser = &ctx->parser;
 
     switch (parser->state) {
     case BINARY_RX_SYNC_1:
@@ -176,139 +203,169 @@ static void handle_binary_frame_byte(uint8_t c)
 
     case BINARY_RX_CHK:
         if (c == pdec_uart_binary_checksum(parser->payload, parser->len)) {
-            pdec_uart_on_binary_frame(parser->payload, parser->len, c);
+            pdec_uart_on_binary_frame(ctx->port, parser->payload, parser->len, c);
         }
-        binary_parser_reset();
+        binary_parser_reset(ctx);
         break;
     }
 }
 
-static void process_byte(uint8_t c)
+static void process_byte(struct uart_protocol_ctx *ctx, uint8_t c)
 {
-    if (uart_protocol.mode == PDEC_UART_MODE_ASCII) {
-        pdec_uart_shell_feed_char(c);
+    if (ctx->mode == PDEC_UART_MODE_ASCII) {
+        pdec_uart_shell_feed_char(ctx->port, c);
         return;
     }
 
-    if (handle_binary_mode_newline(c)) {
+    if (handle_binary_mode_newline(ctx, c)) {
         return;
     }
 
-    handle_binary_frame_byte(c);
+    handle_binary_frame_byte(ctx, c);
 }
 
 static void uart_protocol_work_handler(struct k_work *work)
 {
-    ARG_UNUSED(work);
+    struct uart_protocol_ctx *ctx = CONTAINER_OF(work, struct uart_protocol_ctx, rx_work);
 
     uint8_t buf[32];
     uint32_t count;
 
     do {
-        count = ring_buf_get(&uart_protocol.rx_ring, buf, sizeof(buf));
+        count = ring_buf_get(&ctx->rx_ring, buf, sizeof(buf));
         for (uint32_t i = 0; i < count; ++i) {
-            process_byte(buf[i]);
+            process_byte(ctx, buf[i]);
         }
     } while (count > 0);
 
-    uart_protocol.dropped_bytes = 0;
+    ctx->dropped_bytes = 0;
 }
 
 static void uart_protocol_isr(const struct device *dev, void *user_data)
 {
-    ARG_UNUSED(dev);
-    ARG_UNUSED(user_data);
+    struct uart_protocol_ctx *ctx = user_data;
 
-    if (!uart_irq_update(uart_protocol.uart) || !uart_irq_rx_ready(uart_protocol.uart)) {
+    if (!uart_irq_update(dev)) {
+        return;
+    }
+
+    if (ctx->port == PDEC_SERIAL_USB && uart_irq_tx_ready(dev)) {
+        k_spinlock_key_t key = k_spin_lock(&ctx->tx_lock);
+        uint8_t *data;
+        uint32_t count = ring_buf_get_claim(&ctx->tx_ring, &data, USB_TX_RING_SIZE);
+        int sent = count ? uart_fifo_fill(dev, data, count) : 0;
+
+        ring_buf_get_finish(&ctx->tx_ring, sent > 0 ? sent : 0);
+        if (ring_buf_is_empty(&ctx->tx_ring)) {
+            uart_irq_tx_disable(dev);
+        }
+        k_spin_unlock(&ctx->tx_lock, key);
+    }
+
+    if (!uart_irq_rx_ready(dev)) {
         return;
     }
 
     while (1) {
         uint8_t buf[16];
-        int read = uart_fifo_read(uart_protocol.uart, buf, sizeof(buf));
+        int read = uart_fifo_read(ctx->uart, buf, sizeof(buf));
 
         if (read <= 0) {
             break;
         }
 
-        uint32_t written = ring_buf_put(&uart_protocol.rx_ring, buf, read);
+        uint32_t written = ring_buf_put(&ctx->rx_ring, buf, read);
         if (written < (uint32_t)read) {
-            uart_protocol.dropped_bytes += (uint32_t)(read - written);
+            ctx->dropped_bytes += (uint32_t)(read - written);
         }
     }
 
-    k_work_submit(&uart_protocol.rx_work);
+    k_work_submit(&ctx->rx_work);
 }
 
 int pdec_uart_protocol_init(void)
 {
-    uart_protocol.uart = DEVICE_DT_GET(UART_DEVICE_NODE);
-    if (!device_is_ready(uart_protocol.uart)) {
-        return -ENODEV;
-    }
-
-    ring_buf_init(&uart_protocol.rx_ring, sizeof(uart_protocol.ring_storage),
-                  uart_protocol.ring_storage);
-    k_work_init(&uart_protocol.rx_work, uart_protocol_work_handler);
-    binary_parser_reset();
-    uart_protocol.mode = PDEC_UART_MODE_BINARY;
-
-    int ret = pdec_uart_shell_init();
-    if (ret < 0) {
-        return ret;
-    }
-
-    ret = uart_irq_callback_user_data_set(uart_protocol.uart, uart_protocol_isr, NULL);
-    if (ret < 0) {
-        return ret;
-    }
-
-    uart_irq_rx_enable(uart_protocol.uart);
-    return 0;
-}
-
-enum pdec_uart_mode pdec_uart_protocol_get_mode(void)
-{
-    return uart_protocol.mode;
-}
-
-void pdec_uart_protocol_set_mode(enum pdec_uart_mode mode)
-{
-    if (uart_protocol.mode == mode) {
-        return;
-    }
-
-    set_mode(mode);
-}
-
-void pdec_uart_protocol_write(const uint8_t *data, size_t len)
-{
-    k_mutex_lock(&uart_tx_lock, K_FOREVER);
-    uart_protocol_write_unlocked(data, len);
-    k_mutex_unlock(&uart_tx_lock);
-}
-
-void pdec_uart_protocol_write_str(const char *str)
-{
-    pdec_uart_protocol_write((const uint8_t *)str, strlen(str));
-}
-
-int pdec_uart_protocol_write_binary_frame(const uint8_t *payload, uint8_t len)
-{
-    uint8_t header[] = {
-        UART_PROTOCOL_SYNC_BYTE,
-        UART_PROTOCOL_SYNC_BYTE,
-        len,
+    const struct device *devices[PDEC_SERIAL_PORT_COUNT] = {
+        DEVICE_DT_GET(UART_DEVICE_NODE),
+        DEVICE_DT_GET(USB_DEVICE_NODE),
     };
-    uint8_t chk = pdec_uart_binary_checksum(payload, len);
 
-    k_mutex_lock(&uart_tx_lock, K_FOREVER);
-    uart_protocol_write_unlocked(header, sizeof(header));
-    uart_protocol_write_unlocked(payload, len);
-    uart_protocol_write_unlocked(&chk, 1);
-    k_mutex_unlock(&uart_tx_lock);
+    for (enum pdec_serial_port port = 0; port < PDEC_SERIAL_PORT_COUNT; ++port) {
+        struct uart_protocol_ctx *ctx = &protocols[port];
 
+        if (!device_is_ready(devices[port])) {
+            return -ENODEV;
+        }
+        ctx->port = port;
+        ctx->last_stray_newline_ms = -1;
+        ring_buf_init(&ctx->rx_ring, sizeof(ctx->ring_storage), ctx->ring_storage);
+        ring_buf_init(&ctx->tx_ring, sizeof(ctx->tx_storage), ctx->tx_storage);
+        k_work_init(&ctx->rx_work, uart_protocol_work_handler);
+        binary_parser_reset(ctx);
+        ctx->mode = PDEC_UART_MODE_BINARY;
+
+        int ret = pdec_uart_shell_init(port);
+        if (ret < 0) {
+            return ret;
+        }
+        ret = uart_irq_callback_user_data_set(devices[port], uart_protocol_isr, ctx);
+        if (ret < 0) {
+            return ret;
+        }
+        ctx->uart = devices[port];
+        uart_irq_rx_enable(ctx->uart);
+    }
     return 0;
+}
+
+enum pdec_uart_mode pdec_uart_protocol_get_mode(enum pdec_serial_port port)
+{
+    return protocols[port].mode;
+}
+
+void pdec_uart_protocol_set_mode(enum pdec_serial_port port, enum pdec_uart_mode mode)
+{
+    struct uart_protocol_ctx *ctx = &protocols[port];
+
+    if (ctx->mode != mode) {
+        set_mode(ctx, mode);
+    }
+}
+
+void pdec_uart_protocol_write(enum pdec_serial_port port, const uint8_t *data, size_t len)
+{
+    k_mutex_lock(&uart_tx_lock, K_FOREVER);
+    uart_protocol_write_unlocked(&protocols[port], data, len);
+    k_mutex_unlock(&uart_tx_lock);
+}
+
+void pdec_uart_protocol_write_str(enum pdec_serial_port port, const char *str)
+{
+    pdec_uart_protocol_write(port, (const uint8_t *)str, strlen(str));
+}
+
+int pdec_uart_protocol_write_binary_frame(enum pdec_serial_port port,
+                                         const uint8_t *payload, uint8_t len)
+{
+    uint8_t frame[UART_PROTOCOL_PAYLOAD_MAX + 4] = {
+        UART_PROTOCOL_SYNC_BYTE, UART_PROTOCOL_SYNC_BYTE, len,
+    };
+
+    memcpy(&frame[3], payload, len);
+    frame[3 + len] = pdec_uart_binary_checksum(payload, len);
+    k_mutex_lock(&uart_tx_lock, K_FOREVER);
+    int ret = uart_protocol_write_unlocked(&protocols[port], frame, len + 4);
+    k_mutex_unlock(&uart_tx_lock);
+    return ret;
+}
+
+void pdec_uart_protocol_publish_binary_frame(const uint8_t *payload, uint8_t len)
+{
+    for (enum pdec_serial_port port = 0; port < PDEC_SERIAL_PORT_COUNT; ++port) {
+        if (pdec_uart_protocol_get_mode(port) == PDEC_UART_MODE_BINARY) {
+            (void)pdec_uart_protocol_write_binary_frame(port, payload, len);
+        }
+    }
 }
 
 __attribute__((weak)) uint8_t pdec_uart_binary_checksum(const uint8_t *payload, uint8_t len)
@@ -322,8 +379,9 @@ __attribute__((weak)) uint8_t pdec_uart_binary_checksum(const uint8_t *payload, 
     return checksum;
 }
 
-__attribute__((weak)) void pdec_uart_on_binary_frame(const uint8_t *payload, uint8_t len, uint8_t chk)
+__attribute__((weak)) void pdec_uart_on_binary_frame(enum pdec_serial_port port, const uint8_t *payload, uint8_t len, uint8_t chk)
 {
+    ARG_UNUSED(port);
     ARG_UNUSED(payload);
     ARG_UNUSED(len);
     ARG_UNUSED(chk);

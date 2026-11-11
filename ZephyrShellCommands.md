@@ -1,7 +1,29 @@
-# UART Commands
+# UART and USB serial commands
 
-This application exposes both a binary UART protocol and a Zephyr shell over the
-same UART. The UART starts in binary mode by default.
+This application exposes the same binary protocol and Zephyr shell on the physical
+UART and on the USB CDC ACM virtual serial port. Both ports start in binary mode
+and keep independent modes, parsers and shell sessions. For example, the USB shell
+can be used while the physical UART continues exchanging binary frames.
+
+Command responses return on the port that received the command, including deferred
+ranging results. Unsolicited binary events go to each port currently in binary
+mode; application text goes to the active shells. Radio settings and monitor
+resources remain shared between sessions.
+
+## USB connection
+
+Connect the board's native USB data port and open its virtual serial device
+(typically `/dev/ttyACM0` on Linux or a COM port on Windows). The host must assert
+DTR, as pyserial does by default. The serial baud rate does not affect USB speed.
+The device starts normally with no USB host connected.
+
+The existing `PdecUart` Python client can use the USB device path unchanged.
+Press Enter twice within one second to enter the USB shell, and use `uart binary`
+to return that port to binary mode. These commands also remain available on UART.
+
+USB transmission is buffered and nonblocking. If the host stops reading and the
+buffer fills, new binary frames are dropped whole; they are never partly queued.
+Output while DTR is deasserted is discarded.
 
 ## Binary protocol
 
@@ -56,8 +78,8 @@ Distances are 32-bit floating-point values in meters.
 
 ### Binary ranging events
 
-Binary monitor mode is always on. Whenever a ranging result is produced while
-the UART is in binary mode, the device sends an unsolicited event frame:
+Binary monitor mode is always on. Whenever a ranging result is produced, the
+device sends an unsolicited event frame on each port in binary mode:
 
 | ID | Payload |
 | --- | --- |

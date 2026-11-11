@@ -9,3 +9,11 @@
         reset-gpios   = <&gpio0 25 GPIO_ACTIVE_LOW>;
     };
 };
+
+/* Keep zephyr,console on the physical UART. USB is a second protocol port. */
+&zephyr_udc0 {
+    status = "okay";
+    pdec_usb_uart: pdec_usb_uart {
+        compatible = "zephyr,cdc-acm-uart";
+    };
+};

@@ -11,7 +11,7 @@
 #include "pdec_ranging.h"
 #include "uart_protocol.h"
 
-static void send_distance_msg(uint8_t msg, uint16_t dst_id, uint8_t status, double distance);
+static void send_distance_msg(enum pdec_serial_port port, uint8_t msg, uint16_t dst_id, uint8_t status, double distance);
 
 enum pdec_binary_cmd {
     PDEC_BINARY_CMD_RANGE = 0x01,
@@ -46,6 +46,7 @@ typedef struct __attribute__((packed)) {
 } pdec_binary_range_cmd_t;
 
 struct pdec_binary_range_request {
+    enum pdec_serial_port port;
     uint16_t dst_id;
 };
 
@@ -125,7 +126,7 @@ K_THREAD_STACK_DEFINE(binary_range_stack, BINARY_RANGE_STACK_SIZE);
 static struct k_thread binary_range_thread;
 static bool binary_range_thread_started;
 
-static void send_error(uint8_t cmd, uint8_t status)
+static void send_error(enum pdec_serial_port port, uint8_t cmd, uint8_t status)
 {
     pdec_binary_error_msg_t payload = {
         .msg = PDEC_BINARY_MSG_ERROR,
@@ -133,7 +134,7 @@ static void send_error(uint8_t cmd, uint8_t status)
         .status = status,
     };
 
-    (void)pdec_uart_protocol_write_binary_frame((const uint8_t *)&payload,
+    (void)pdec_uart_protocol_write_binary_frame(port, (const uint8_t *)&payload,
                                                 sizeof(payload));
 }
 
@@ -153,12 +154,12 @@ static void binary_range_worker(void *p1, void *p2, void *p3)
         double distance;
         int ret = request_range(request.dst_id, true, &distance, K_MSEC(100));
         if (ret != 0) {
-            send_distance_msg(PDEC_BINARY_MSG_RANGE_RESULT, request.dst_id,
+            send_distance_msg(request.port, PDEC_BINARY_MSG_RANGE_RESULT, request.dst_id,
                               PDEC_BINARY_STATUS_RANGE_FAILED, 0.0);
             continue;
         }
 
-        send_distance_msg(PDEC_BINARY_MSG_RANGE_RESULT, request.dst_id,
+        send_distance_msg(request.port, PDEC_BINARY_MSG_RANGE_RESULT, request.dst_id,
                           PDEC_BINARY_STATUS_OK, distance);
     }
 }
@@ -176,7 +177,7 @@ static void start_binary_range_thread(void)
     binary_range_thread_started = true;
 }
 
-static void send_distance_msg(uint8_t msg, uint16_t dst_id, uint8_t status, double distance)
+static void send_distance_msg(enum pdec_serial_port port, uint8_t msg, uint16_t dst_id, uint8_t status, double distance)
 {
     pdec_binary_distance_msg_t payload = {
         .msg = msg,
@@ -185,34 +186,35 @@ static void send_distance_msg(uint8_t msg, uint16_t dst_id, uint8_t status, doub
         .distance = (float)distance,
     };
 
-    (void)pdec_uart_protocol_write_binary_frame((const uint8_t *)&payload,
+    (void)pdec_uart_protocol_write_binary_frame(port, (const uint8_t *)&payload,
                                                 sizeof(payload));
 }
 
-static void handle_range_cmd(const uint8_t *payload, uint8_t len)
+static void handle_range_cmd(enum pdec_serial_port port, const uint8_t *payload, uint8_t len)
 {
     if (len != sizeof(pdec_binary_range_cmd_t)) {
-        send_error(PDEC_BINARY_CMD_RANGE, PDEC_BINARY_STATUS_INVALID_LENGTH);
+        send_error(port, PDEC_BINARY_CMD_RANGE, PDEC_BINARY_STATUS_INVALID_LENGTH);
         return;
     }
 
     const pdec_binary_range_cmd_t *cmd = (const pdec_binary_range_cmd_t *)payload;
     struct pdec_binary_range_request request = {
+        .port = port,
         .dst_id = cmd->dst_id,
     };
 
     start_binary_range_thread();
 
     if (k_msgq_put(&binary_range_queue, &request, K_NO_WAIT) != 0) {
-        send_distance_msg(PDEC_BINARY_MSG_RANGE_RESULT, cmd->dst_id,
+        send_distance_msg(port, PDEC_BINARY_MSG_RANGE_RESULT, cmd->dst_id,
                           PDEC_BINARY_STATUS_RANGE_FAILED, 0.0);
     }
 }
 
-static void handle_get_distance_cmd(const uint8_t *payload, uint8_t len)
+static void handle_get_distance_cmd(enum pdec_serial_port port, const uint8_t *payload, uint8_t len)
 {
     if (len != sizeof(pdec_binary_get_distance_cmd_t)) {
-        send_error(PDEC_BINARY_CMD_GET_DISTANCE, PDEC_BINARY_STATUS_INVALID_LENGTH);
+        send_error(port, PDEC_BINARY_CMD_GET_DISTANCE, PDEC_BINARY_STATUS_INVALID_LENGTH);
         return;
     }
 
@@ -221,21 +223,21 @@ static void handle_get_distance_cmd(const uint8_t *payload, uint8_t len)
     double distance = get_distance(get_my_id(), cmd->dst_id);
 
     if (distance < 0.0) {
-        send_distance_msg(PDEC_BINARY_MSG_DISTANCE, cmd->dst_id,
+        send_distance_msg(port, PDEC_BINARY_MSG_DISTANCE, cmd->dst_id,
                           PDEC_BINARY_STATUS_NOT_FOUND, 0.0);
         return;
     }
 
-    send_distance_msg(PDEC_BINARY_MSG_DISTANCE, cmd->dst_id,
+    send_distance_msg(port, PDEC_BINARY_MSG_DISTANCE, cmd->dst_id,
                       PDEC_BINARY_STATUS_OK, distance);
 }
 
-static void handle_list_devices_cmd(const uint8_t *payload, uint8_t len)
+static void handle_list_devices_cmd(enum pdec_serial_port port, const uint8_t *payload, uint8_t len)
 {
     ARG_UNUSED(payload);
 
     if (len != sizeof(pdec_binary_list_devices_cmd_t)) {
-        send_error(PDEC_BINARY_CMD_LIST_DEVICES, PDEC_BINARY_STATUS_INVALID_LENGTH);
+        send_error(port, PDEC_BINARY_CMD_LIST_DEVICES, PDEC_BINARY_STATUS_INVALID_LENGTH);
         return;
     }
 
@@ -251,17 +253,17 @@ static void handle_list_devices_cmd(const uint8_t *payload, uint8_t len)
         response.count++;
     }
 
-    (void)pdec_uart_protocol_write_binary_frame((const uint8_t *)&response,
+    (void)pdec_uart_protocol_write_binary_frame(port, (const uint8_t *)&response,
                                                 sizeof(response.msg) +
                                                 sizeof(response.count) +
                                                 (response.count *
                                                  sizeof(response.device_id[0])));
 }
 
-static void handle_send_data_cmd(const uint8_t *payload, uint8_t len)
+static void handle_send_data_cmd(enum pdec_serial_port port, const uint8_t *payload, uint8_t len)
 {
     if (len < sizeof(pdec_binary_send_data_cmd_header_t)) {
-        send_error(PDEC_BINARY_CMD_SEND_DATA, PDEC_BINARY_STATUS_INVALID_LENGTH);
+        send_error(port, PDEC_BINARY_CMD_SEND_DATA, PDEC_BINARY_STATUS_INVALID_LENGTH);
         return;
     }
 
@@ -278,40 +280,40 @@ static void handle_send_data_cmd(const uint8_t *payload, uint8_t len)
     if (data_len > PAYLOAD_FRAME_LEN_MAX) {
         response.status = PDEC_BINARY_STATUS_MESSAGE_TOO_LONG;
         response.sent_len = 0;
-        (void)pdec_uart_protocol_write_binary_frame((const uint8_t *)&response,
+        (void)pdec_uart_protocol_write_binary_frame(port, (const uint8_t *)&response,
                                                     sizeof(response));
         return;
     }
 
     send_data_msg(cmd->dst_id, (uint8_t *)&payload[sizeof(*cmd)], data_len);
-    (void)pdec_uart_protocol_write_binary_frame((const uint8_t *)&response,
+    (void)pdec_uart_protocol_write_binary_frame(port, (const uint8_t *)&response,
                                                 sizeof(response));
 }
 
-void pdec_uart_on_binary_frame(const uint8_t *payload, uint8_t len, uint8_t chk)
+void pdec_uart_on_binary_frame(enum pdec_serial_port port, const uint8_t *payload, uint8_t len, uint8_t chk)
 {
     ARG_UNUSED(chk);
 
     if (len == 0) {
-        send_error(0, PDEC_BINARY_STATUS_INVALID_LENGTH);
+        send_error(port, 0, PDEC_BINARY_STATUS_INVALID_LENGTH);
         return;
     }
 
     switch (payload[0]) {
     case PDEC_BINARY_CMD_RANGE:
-        handle_range_cmd(payload, len);
+        handle_range_cmd(port, payload, len);
         break;
     case PDEC_BINARY_CMD_GET_DISTANCE:
-        handle_get_distance_cmd(payload, len);
+        handle_get_distance_cmd(port, payload, len);
         break;
     case PDEC_BINARY_CMD_LIST_DEVICES:
-        handle_list_devices_cmd(payload, len);
+        handle_list_devices_cmd(port, payload, len);
         break;
     case PDEC_BINARY_CMD_SEND_DATA:
-        handle_send_data_cmd(payload, len);
+        handle_send_data_cmd(port, payload, len);
         break;
     default:
-        send_error(payload[0], PDEC_BINARY_STATUS_ERROR);
+        send_error(port, payload[0], PDEC_BINARY_STATUS_ERROR);
         break;
     }
 }
@@ -319,10 +321,6 @@ void pdec_uart_on_binary_frame(const uint8_t *payload, uint8_t len, uint8_t chk)
 void pdec_uart_binary_publish_ranging_event(uint8_t kind, uint16_t src_id,
                                             uint16_t dst_id, double distance)
 {
-    if (pdec_uart_protocol_get_mode() != PDEC_UART_MODE_BINARY) {
-        return;
-    }
-
     pdec_binary_ranging_event_msg_t payload = {
         .msg = PDEC_BINARY_MSG_RANGING_EVENT,
         .kind = kind,
@@ -331,17 +329,13 @@ void pdec_uart_binary_publish_ranging_event(uint8_t kind, uint16_t src_id,
         .distance = (float)distance,
     };
 
-    (void)pdec_uart_protocol_write_binary_frame((const uint8_t *)&payload,
+    pdec_uart_protocol_publish_binary_frame((const uint8_t *)&payload,
                                                 sizeof(payload));
 }
 
 void pdec_uart_binary_publish_data_event(uint16_t src_id, const uint8_t *data,
                                          uint8_t len)
 {
-    if (pdec_uart_protocol_get_mode() != PDEC_UART_MODE_BINARY) {
-        return;
-    }
-
     if (len > PAYLOAD_FRAME_LEN_MAX) {
         len = PAYLOAD_FRAME_LEN_MAX;
     }
@@ -354,7 +348,7 @@ void pdec_uart_binary_publish_data_event(uint16_t src_id, const uint8_t *data,
 
     memcpy(payload.data, data, len);
 
-    (void)pdec_uart_protocol_write_binary_frame((const uint8_t *)&payload,
+    pdec_uart_protocol_publish_binary_frame((const uint8_t *)&payload,
                                                 sizeof(payload.msg) +
                                                 sizeof(payload.src_id) +
                                                 sizeof(payload.len) + len);
@@ -366,10 +360,6 @@ void pdec_uart_binary_publish_tdoa_report_event(uint32_t blink_id, uint8_t expec
 {
     uint8_t payload[1 + sizeof(uint32_t) + 3 + (10 * (sizeof(uint16_t) + sizeof(float)))];
     size_t offset = 0;
-
-    if (pdec_uart_protocol_get_mode() != PDEC_UART_MODE_BINARY) {
-        return;
-    }
 
     if (count > 10) {
         count = 10;
@@ -391,5 +381,5 @@ void pdec_uart_binary_publish_tdoa_report_event(uint32_t blink_id, uint8_t expec
         offset += sizeof(distance);
     }
 
-    (void)pdec_uart_protocol_write_binary_frame(payload, offset);
+    pdec_uart_protocol_publish_binary_frame(payload, offset);
 }

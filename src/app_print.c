@@ -23,16 +23,15 @@ static int pdec_vprint_common(const char *fmt, va_list args)
         return len;
     }
 
-    if (pdec_uart_protocol_get_mode() != PDEC_UART_MODE_ASCII) {
-        return len;
+    for (enum pdec_serial_port port = 0; port < PDEC_SERIAL_PORT_COUNT; ++port) {
+        if (pdec_uart_protocol_get_mode(port) != PDEC_UART_MODE_ASCII) {
+            continue;
+        }
+        sh = pdec_uart_shell_backend_get(port);
+        if (sh != NULL && shell_ready(sh)) {
+            shell_fprintf_normal(sh, "%s", buf);
+        }
     }
-
-    sh = pdec_uart_shell_backend_get();
-    if ((sh == NULL) || !shell_ready(sh)) {
-        return len;
-    }
-
-    shell_fprintf_normal(sh, "%s", buf);
     return len;
 }
 
