@@ -46,6 +46,8 @@ void pdec_radio_tx_done(void);
 void pdec_radio_rx_error(void);
 bool pdec_radio_can_respond(void);
 bool pdec_radio_matches_response(const resp_msg_t *msg, bool double_sided);
+/* Owner-only, valid for the active response exchange after POLL TX done. */
+uint64_t pdec_radio_poll_tx_timestamp(void);
 bool pdec_radio_matches_final(const final_msg_t *msg);
 void pdec_radio_complete_exchange(void);
 

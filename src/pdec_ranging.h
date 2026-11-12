@@ -9,8 +9,8 @@ enum ranging_monitor_scope {
 };
 
 void ranging_init();
-void handle_resp_msg(resp_msg_t* msg, bool double_sided);
-void handle_poll_msg(poll_msg_t* msg, bool double_sided);
+void handle_resp_msg(resp_msg_t* msg, bool double_sided, int16_t raw_clock_offset);
+void handle_poll_msg(poll_msg_t* msg, bool double_sided, int16_t raw_clock_offset);
 void handle_final_msg(final_msg_t* msg);
 int send_poll(uint16_t dst_id, bool double_sided);
 int request_range(uint16_t dst_id, bool double_sided, double *distance, k_timeout_t timeout);

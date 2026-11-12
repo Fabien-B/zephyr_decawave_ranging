@@ -69,7 +69,7 @@ struct result_event {
 K_MSGQ_DEFINE(monitor_queue, sizeof(struct ranging_event), MONITOR_QUEUE_LEN, 8);
 K_MSGQ_DEFINE(result_queue, sizeof(struct result_event), RESULT_QUEUE_LEN, 8);
 // delay between frame RX, and the delayed TX
-#define POLL_RX_TO_RESP_TX_DLY_UUS 1500
+#define POLL_RX_TO_RESP_TX_DLY_UUS 900
 
 
 
@@ -77,6 +77,10 @@ K_MSGQ_DEFINE(result_queue, sizeof(struct result_event), RESULT_QUEUE_LEN, 8);
 extern uint8_t frame_seq_nb;
 
 static union ranging_msg_u tx_msg;
+/* Matching tokens, not security nonces. Seed once; avoid potentially blocking
+ * hardware entropy reads while a delayed response must be armed.
+ */
+static uint8_t next_poll_token, next_response_token;
 
 static const char *ranging_event_kind_label(enum ranging_event_kind kind)
 {
@@ -192,6 +196,8 @@ void ranging_init() {
     tx_msg.header.frame_control = FRAME_CONTROL;
     tx_msg.header.pan_id = MY_PAN_ID;
     tx_msg.header.src_id = get_my_id();
+    next_poll_token = sys_rand8_get();
+    next_response_token = sys_rand8_get();
     start_result_thread();
 }
 
@@ -213,22 +219,16 @@ void publish_com_event(uint16_t src_id, const uint8_t *payload, uint8_t len)
     (void)k_msgq_put(&result_queue, &event, K_NO_WAIT);
 }
 
-void handle_resp_msg(resp_msg_t* msg, bool double_sided) {
+void handle_resp_msg(resp_msg_t* msg, bool double_sided, int16_t raw_clock_offset) {
     if (!pdec_radio_matches_response(msg, double_sided))
     {
+        pdec_database_update_rx(msg->header.src_id, raw_clock_offset);
         return;
     }
 
-    uint64_t poll_tx_ts = get_tx_timestamp_u64();
+    uint64_t poll_tx_ts = pdec_radio_poll_tx_timestamp();
     uint64_t resp_rx_ts = get_rx_timestamp_u64();
     pdec_radio_timing_rx_timestamp(resp_rx_ts);
-    uint32_t t_round = (uint32_t)(resp_rx_ts - poll_tx_ts);
-
-    uint32_t t_reply_b = wrap32_diff(msg->resp_tx_ts, msg->poll_rx_ts);
-    /* Compute time of flight and distance, using clock offset ratio to correct for differing local and remote clock rates */
-    double tof = ((t_round - t_reply_b * get_clock_offset(msg->header.src_id)) / 2.0) * DWT_TIME_UNITS;
-    double distance = tof * SPEED_OF_LIGHT;
-
     if(double_sided) {
         // en dtu (499.2MHz*128)
         uint32_t deltat = (POLL_RX_TO_RESP_TX_DLY_UUS * UUS_TO_DWT_TIME);
@@ -260,7 +260,15 @@ void handle_resp_msg(resp_msg_t* msg, bool double_sided) {
         pdec_radio_complete_exchange();
     }
 
-    /* Reuse stamps already read, after the FINAL request is armed. */
+    /* RX-dependent registers have been captured. Everything below can wait
+     * until FINAL has been requested (or the SS exchange has completed).
+     */
+    pdec_database_update_rx(msg->header.src_id, raw_clock_offset);
+    uint32_t t_round = (uint32_t)(resp_rx_ts - poll_tx_ts);
+    uint32_t t_reply_b = wrap32_diff(msg->resp_tx_ts, msg->poll_rx_ts);
+    double tof = ((t_round - t_reply_b * get_clock_offset(msg->header.src_id)) / 2.0) * DWT_TIME_UNITS;
+    double distance = tof * SPEED_OF_LIGHT;
+
     pdec_radio_timing_peer_turnaround(PDEC_TIMING_RESPONSE, poll_tx_ts, resp_rx_ts);
     pdec_radio_range_measured(distance);
     set_distance(get_my_id(), msg->header.src_id, distance);
@@ -272,9 +280,10 @@ void handle_resp_msg(resp_msg_t* msg, bool double_sided) {
 
 }
 
-void handle_poll_msg(poll_msg_t* msg, bool double_sided) {
+void handle_poll_msg(poll_msg_t* msg, bool double_sided, int16_t raw_clock_offset) {
     if (!pdec_radio_can_respond() ||
         (msg->header.dst_id != get_my_id() && msg->header.dst_id != BROADCAST_ID)) {
+        pdec_database_update_rx(msg->header.src_id, raw_clock_offset);
         return;
     }
 
@@ -290,7 +299,7 @@ void handle_poll_msg(poll_msg_t* msg, bool double_sided) {
     
     tx_msg.header.seq_number = frame_seq_nb;
     tx_msg.resp.poll_id = msg->poll_id;
-    tx_msg.resp.resp_id = sys_rand8_get();
+    tx_msg.resp.resp_id = next_response_token++;
 
     /* Retrieve poll reception timestamp. */
     uint64_t poll_rx_ts = get_rx_timestamp_u64();
@@ -311,6 +320,7 @@ void handle_poll_msg(poll_msg_t* msg, bool double_sided) {
                             true, resp_tx_time) == 0) {
         frame_seq_nb++;
     }
+    pdec_database_update_rx(msg->header.src_id, raw_clock_offset);
 }
 
 
@@ -378,7 +388,7 @@ void send_poll_now(uint16_t dst_id, bool double_sided) {
     } else {
         tx_msg.header.frame_role = DF_SS_RANGING_POLL;
     }
-    tx_msg.poll.poll_id =  sys_rand8_get();
+    tx_msg.poll.poll_id = next_poll_token++;
 
     if (pdec_radio_transmit(&tx_msg.poll, sizeof(tx_msg.poll), true, false, 0) == 0) {
         frame_seq_nb++;

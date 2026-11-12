@@ -39,6 +39,8 @@ int add_device(uint16_t id);
  * @param id 16-bit device short address.
  */
 void touch_device(uint16_t id);
+/* Capture raw offset in RX; defer bookkeeping/conversion until TX is armed. */
+void pdec_database_update_rx(uint16_t id, int16_t raw_clock_offset);
 
 /**
  * @brief Store the advertised TDOA role for a device.

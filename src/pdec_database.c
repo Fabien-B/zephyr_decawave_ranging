@@ -180,6 +180,12 @@ void touch_device(uint16_t id)
     }
 }
 
+void pdec_database_update_rx(uint16_t id, int16_t raw_clock_offset)
+{
+    touch_device(id);
+    set_clock_offset(id, (float)raw_clock_offset / (uint32_t)(1U << 26));
+}
+
 void set_device_tdoa_role(uint16_t id, uint8_t role)
 {
     int index = get_device_index(id);

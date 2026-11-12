@@ -122,38 +122,36 @@ static void process_rx_ok(uint16_t frame_len)
         return;
     }
 
-    touch_device(header->src_id);
-
-    // Read carrier integrator value and calculate clock offset ratio.
-    double clockOffsetRatio = ((float)dwt_readclockoffset()) / (uint32_t)(1 << 26);
-    set_clock_offset(header->src_id, clockOffsetRatio);
-
-    switch (header->frame_role)
-    {
+    /* Capture this frame's clock register before any TX/RX state change. The
+     * conversion and device-table maintenance can wait until the reply is armed.
+     */
+    int16_t raw_clock_offset = dwt_readclockoffset();
+    switch (header->frame_role) {
     case DF_SS_RANGING_POLL:
-        if (frame_len < sizeof(poll_msg_t)) {
-            break;
-        }
-        handle_poll_msg((poll_msg_t*)header, false);
-        break;
     case DF_DS_RANGING_POLL:
-        if (frame_len < sizeof(poll_msg_t)) {
-            break;
+        if (frame_len >= sizeof(poll_msg_t)) {
+            handle_poll_msg((poll_msg_t *)header, header->frame_role == DF_DS_RANGING_POLL,
+                            raw_clock_offset);
+            return;
         }
-        handle_poll_msg((poll_msg_t*)header, true);
         break;
     case DF_SS_RANGING_RESP:
-        if (frame_len < sizeof(resp_msg_t)) {
-            break;
-        }
-        handle_resp_msg((resp_msg_t*)header, false);
-        break;
     case DF_DS_RANGING_RESP:
-        if (frame_len < sizeof(resp_msg_t)) {
-            break;
+        if (frame_len >= sizeof(resp_msg_t)) {
+            handle_resp_msg((resp_msg_t *)header, header->frame_role == DF_DS_RANGING_RESP,
+                            raw_clock_offset);
+            return;
         }
-        handle_resp_msg((resp_msg_t*)header, true);
         break;
+    default:
+        break;
+    }
+
+    /* Other handlers keep the existing ordering, including passive TDOA which
+     * consumes the current clock correction from the device database.
+     */
+    pdec_database_update_rx(header->src_id, raw_clock_offset);
+    switch (header->frame_role) {
     case DF_DS_RANGING_FINAL:
         if (frame_len < sizeof(final_msg_t)) {
             break;

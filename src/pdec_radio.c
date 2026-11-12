@@ -70,6 +70,8 @@ static double measured_distance;
 static bool tx_control_valid;
 static uint16_t tx_control_len;
 static bool tx_control_ranging;
+static uint64_t poll_tx_timestamp;
+static bool poll_tx_timestamp_valid;
 
 static atomic_t timing_enabled;
 static struct k_spinlock timing_lock;
@@ -254,6 +256,7 @@ static void recover_radio(int result)
 {
     radio_state = PDEC_RADIO_RECOVERING;
     exchange.phase = PDEC_EXCHANGE_NONE;
+    poll_tx_timestamp_valid = false;
     finish_request(result);
     dwt_forcetrxoff();
     dwt_writesysstatuslo(DWT_INT_RX | DWT_INT_TXFRS_BIT_MASK);
@@ -302,6 +305,13 @@ void pdec_radio_tx_done(void)
     state_deadline = 0;
     if (exchange.phase != PDEC_EXCHANGE_NONE) {
         exchange.deadline = deadline_after_us(EXCHANGE_TIMEOUT_US);
+        if (exchange.phase == PDEC_EXCHANGE_RESPONSE) {
+            /* Read once after POLL finishes, outside RESPONSE->FINAL setup.
+             * dwt_isr handles TX done before RXOK if both are pending.
+             */
+            poll_tx_timestamp = get_tx_timestamp_u64();
+            poll_tx_timestamp_valid = true;
+        }
     } else if (range_measured) {
         finish_request(0);
     }
@@ -340,6 +350,14 @@ bool pdec_radio_matches_response(const resp_msg_t *msg, bool double_sided)
            exchange.token == msg->poll_id &&
            exchange.double_sided == double_sided &&
            msg->header.dst_id == get_my_id();
+}
+
+uint64_t pdec_radio_poll_tx_timestamp(void)
+{
+    pdec_radio_assert_owner();
+    __ASSERT(poll_tx_timestamp_valid && exchange.phase == PDEC_EXCHANGE_RESPONSE,
+             "POLL TX timestamp requested outside the active exchange");
+    return poll_tx_timestamp;
 }
 
 bool pdec_radio_matches_final(const final_msg_t *msg)
@@ -460,6 +478,7 @@ int pdec_radio_transmit(const void *frame, uint16_t len, bool ranging,
     }
 
     exchange.phase = PDEC_EXCHANGE_NONE;
+    poll_tx_timestamp_valid = false;
     if (header->frame_role == DF_SS_RANGING_POLL ||
         header->frame_role == DF_DS_RANGING_POLL) {
         exchange.phase = PDEC_EXCHANGE_RESPONSE;
