@@ -6,9 +6,32 @@ and keep independent modes, parsers and shell sessions. For example, the USB she
 can be used while the physical UART continues exchanging binary frames.
 
 Command responses return on the port that received the command, including deferred
-ranging results. Unsolicited binary events go to each port currently in binary
-mode; application text goes to the active shells. Radio settings and monitor
-resources remain shared between sessions.
+ranging results. By default, unsolicited binary events follow the most recent
+command port: receiving a binary command on USB suppresses UART reports, and a
+subsequent command on UART transfers reports to UART. The selected port must be
+in binary mode. Before the first command, events go to both binary ports.
+Application text goes to the active shells. Radio settings and monitor resources
+remain shared between sessions.
+
+Use the shell command `uart reports` to change routing at runtime:
+
+```text
+uart reports active    # Follow the latest binary-command port (default).
+uart reports all       # Broadcast to both binary ports.
+uart reports status    # Show the current policy; `uart reports` also works.
+```
+
+The setting is shared by both ports and resets to `active` after reboot. Shell
+commands do not select a report port; return to binary mode with `uart binary`
+and send a binary command to select that port. Commands received while the policy
+is `all` still update the latest port, used if you switch back to `active`.
+Selection happens for a complete,
+nonempty frame with a valid checksum, before dispatch; unsupported commands also
+select their port. Partial frames, checksum errors, empty frames and shell input
+do not change report routing. Ranging, data and TDOA reports all use this policy.
+Already queued USB reports or a transmission in progress may still finish on the
+previous port. Disconnecting USB does not automatically transfer routing to UART;
+send a binary command on UART to select it. Reboot clears the selection.
 
 ## USB connection
 
@@ -46,6 +69,7 @@ The first payload byte is the command, response, or event ID.
 | `0x02` | `<dst_id:u16>` | Get the last known distance to a target device. |
 | `0x03` | none | List known device IDs. |
 | `0x04` | `<dst_id:u16> <data...>` | Send a data payload to a target device. |
+| `0x05` | `<enabled:u8>` | Set outgoing discovery: `0` off, `1` on. |
 
 For example, `ranging range 0x4567` is encoded as payload bytes:
 
@@ -62,6 +86,30 @@ For example, `ranging range 0x4567` is encoded as payload bytes:
 | `0x82` | `<dst_id:u16> <status:u8> <distance:f32>` | Last known distance result. |
 | `0x83` | `<count:u8> <device_id:u16>...` | Known device list. |
 | `0x84` | `<dst_id:u16> <status:u8> <sent_len:u8>` | Data-send result. |
+| `0x85` | `<status:u8> <enabled:u8>` | Discovery setting after command `0x05`. |
+
+Discovery control affects the connected module only, using the same volatile
+setting as `ranging discovery off|on`. It suppresses periodic and queued outgoing
+HELLOs; an emission already started may finish. Incoming discovery is still
+processed. Reboot restores discovery to on. Invalid lengths return error `0x02`;
+enabled values other than `0` or `1` return generic error `0x01`, without changing
+the setting. Replies return only on the requesting serial port.
+
+Complete disable frame: `ff ff 02 05 00 07`. Successful reply:
+`ff ff 03 85 00 00 86`. Enable frame: `ff ff 02 05 01 06`.
+
+With the port in binary mode and no other application using it:
+
+```python
+from pdec_uart import PdecUart
+
+with PdecUart("/dev/ttyACM0") as device:
+    device.set_discovery(False)  # Returns False after acknowledgement.
+    # device.set_discovery(True) re-enables outgoing discovery.
+```
+
+The Python client also accepts `device.command("discovery off")` and
+`device.command("discovery on")`.
 
 Status values:
 
@@ -78,8 +126,8 @@ Distances are 32-bit floating-point values in meters.
 
 ### Binary ranging events
 
-Binary monitor mode is always on. Whenever a ranging result is produced, the
-device sends an unsolicited event frame on each port in binary mode:
+Whenever a ranging result is produced, the device sends an unsolicited event
+frame according to the report routing policy above:
 
 | ID | Payload |
 | --- | --- |

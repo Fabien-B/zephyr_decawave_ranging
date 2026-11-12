@@ -182,9 +182,31 @@ static int cmd_uart_send(const struct shell *sh, size_t argc, char **argv)
     return 0;
 }
 
+static int cmd_uart_reports(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc > 2) {
+        shell_error(sh, "Usage: uart reports [active|all|status]");
+        return -EINVAL;
+    }
+    if (argc == 2) {
+        if (strcmp(argv[1], "active") == 0) {
+            pdec_uart_protocol_set_reports_follow_commands(true);
+        } else if (strcmp(argv[1], "all") == 0) {
+            pdec_uart_protocol_set_reports_follow_commands(false);
+        } else if (strcmp(argv[1], "status") != 0) {
+            shell_error(sh, "Usage: uart reports [active|all|status]");
+            return -EINVAL;
+        }
+    }
+    shell_print(sh, "Binary reports: %s",
+                pdec_uart_protocol_reports_follow_commands() ? "active (latest binary command port)" : "all binary ports");
+    return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_uart,
     SHELL_CMD(binary, NULL, "Switch this port back to binary mode.", cmd_uart_binary),
     SHELL_CMD(send, NULL, "Send an ASCII data message.", cmd_uart_send),
+    SHELL_CMD(reports, NULL, "Route binary reports: active|all|status.", cmd_uart_reports),
     SHELL_SUBCMD_SET_END
 );
 

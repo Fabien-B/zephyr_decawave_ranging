@@ -61,6 +61,9 @@ struct uart_protocol_ctx {
 static struct uart_protocol_ctx protocols[PDEC_SERIAL_PORT_COUNT];
 
 static K_MUTEX_DEFINE(uart_tx_lock);
+/* Protected by uart_tx_lock; COUNT means no command port has been selected. */
+static enum pdec_serial_port report_port = PDEC_SERIAL_PORT_COUNT;
+static bool reports_follow_commands = true;
 /* Parsing can emit polled UART replies. Keep it preemptible and off the
  * cooperative system workqueue, so it cannot hold up the radio owner.
  */
@@ -210,6 +213,11 @@ static void handle_binary_frame_byte(struct uart_protocol_ctx *ctx, uint8_t c)
 
     case BINARY_RX_CHK:
         if (c == pdec_uart_binary_checksum(parser->payload, parser->len)) {
+            if (parser->len != 0) {
+                k_mutex_lock(&uart_tx_lock, K_FOREVER);
+                report_port = ctx->port;
+                k_mutex_unlock(&uart_tx_lock);
+            }
             pdec_uart_on_binary_frame(ctx->port, parser->payload, parser->len, c);
         }
         binary_parser_reset(ctx);
@@ -353,8 +361,9 @@ void pdec_uart_protocol_write_str(enum pdec_serial_port port, const char *str)
     pdec_uart_protocol_write(port, (const uint8_t *)str, strlen(str));
 }
 
-int pdec_uart_protocol_write_binary_frame(enum pdec_serial_port port,
-                                         const uint8_t *payload, uint8_t len)
+/* Caller holds uart_tx_lock, including report selection and transmission. */
+static int write_binary_frame_unlocked(enum pdec_serial_port port,
+                                       const uint8_t *payload, uint8_t len)
 {
     uint8_t frame[UART_PROTOCOL_PAYLOAD_MAX + 4] = {
         UART_PROTOCOL_SYNC_BYTE, UART_PROTOCOL_SYNC_BYTE, len,
@@ -362,19 +371,46 @@ int pdec_uart_protocol_write_binary_frame(enum pdec_serial_port port,
 
     memcpy(&frame[3], payload, len);
     frame[3 + len] = pdec_uart_binary_checksum(payload, len);
+    return uart_protocol_write_unlocked(&protocols[port], frame, len + 4);
+}
+
+int pdec_uart_protocol_write_binary_frame(enum pdec_serial_port port,
+                                         const uint8_t *payload, uint8_t len)
+{
     k_mutex_lock(&uart_tx_lock, K_FOREVER);
-    int ret = uart_protocol_write_unlocked(&protocols[port], frame, len + 4);
+    int ret = write_binary_frame_unlocked(port, payload, len);
     k_mutex_unlock(&uart_tx_lock);
     return ret;
 }
 
 void pdec_uart_protocol_publish_binary_frame(const uint8_t *payload, uint8_t len)
 {
+    k_mutex_lock(&uart_tx_lock, K_FOREVER);
     for (enum pdec_serial_port port = 0; port < PDEC_SERIAL_PORT_COUNT; ++port) {
+        if (reports_follow_commands &&
+            report_port != PDEC_SERIAL_PORT_COUNT && report_port != port) {
+            continue;
+        }
         if (pdec_uart_protocol_get_mode(port) == PDEC_UART_MODE_BINARY) {
-            (void)pdec_uart_protocol_write_binary_frame(port, payload, len);
+            (void)write_binary_frame_unlocked(port, payload, len);
         }
     }
+    k_mutex_unlock(&uart_tx_lock);
+}
+
+void pdec_uart_protocol_set_reports_follow_commands(bool enabled)
+{
+    k_mutex_lock(&uart_tx_lock, K_FOREVER);
+    reports_follow_commands = enabled;
+    k_mutex_unlock(&uart_tx_lock);
+}
+
+bool pdec_uart_protocol_reports_follow_commands(void)
+{
+    k_mutex_lock(&uart_tx_lock, K_FOREVER);
+    bool enabled = reports_follow_commands;
+    k_mutex_unlock(&uart_tx_lock);
+    return enabled;
 }
 
 __attribute__((weak)) uint8_t pdec_uart_binary_checksum(const uint8_t *payload, uint8_t len)

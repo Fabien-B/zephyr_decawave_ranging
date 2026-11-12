@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 enum pdec_uart_mode {
@@ -23,7 +24,14 @@ void pdec_uart_protocol_write(enum pdec_serial_port port, const uint8_t *data, s
 void pdec_uart_protocol_write_str(enum pdec_serial_port port, const char *str);
 int pdec_uart_protocol_write_binary_frame(enum pdec_serial_port port, const uint8_t *payload, uint8_t len);
 
-/* Publish events only to ports currently in binary mode. */
+/* Runtime policy, shared by USB and UART. Defaults to true after reboot. */
+void pdec_uart_protocol_set_reports_follow_commands(bool enabled);
+bool pdec_uart_protocol_reports_follow_commands(void);
+
+/* Publish only to binary ports. With follow-commands routing enabled,
+ * unsolicited events follow the latest checksum-valid, nonempty command frame.
+ * Explicit command replies are unaffected by this routing policy.
+ */
 void pdec_uart_protocol_publish_binary_frame(const uint8_t *payload, uint8_t len);
 
 /*
