@@ -116,6 +116,15 @@ static void set_mode(struct uart_protocol_ctx *ctx, enum pdec_uart_mode mode)
     int ret;
 
     if (mode == PDEC_UART_MODE_ASCII) {
+        /* uart binary can call shell_stop() from a shell command handler.
+         * Zephyr's command loop sets the shell ACTIVE again on handler return.
+         * Restore INITIALIZED here, outside that handler, before restarting.
+         * Stopping an already stopped shell returns -ENOTSUP.
+         */
+        ret = pdec_uart_shell_stop(ctx->port);
+        if (ret < 0 && ret != -ENOTSUP) {
+            return;
+        }
         ret = pdec_uart_shell_start(ctx->port);
         if (ret < 0 && ret != -EALREADY) {
             return;

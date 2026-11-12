@@ -221,6 +221,7 @@ void handle_resp_msg(resp_msg_t* msg, bool double_sided) {
 
     uint64_t poll_tx_ts = get_tx_timestamp_u64();
     uint64_t resp_rx_ts = get_rx_timestamp_u64();
+    pdec_radio_timing_rx_timestamp(resp_rx_ts);
     uint32_t t_round = (uint32_t)(resp_rx_ts - poll_tx_ts);
 
     uint32_t t_reply_b = wrap32_diff(msg->resp_tx_ts, msg->poll_rx_ts);
@@ -259,6 +260,8 @@ void handle_resp_msg(resp_msg_t* msg, bool double_sided) {
         pdec_radio_complete_exchange();
     }
 
+    /* Reuse stamps already read, after the FINAL request is armed. */
+    pdec_radio_timing_peer_turnaround(PDEC_TIMING_RESPONSE, poll_tx_ts, resp_rx_ts);
     pdec_radio_range_measured(distance);
     set_distance(get_my_id(), msg->header.src_id, distance);
     publish_ranging_event(get_my_id(), msg->header.src_id, distance, RANGING_EVENT_KIND_SS);
@@ -291,6 +294,7 @@ void handle_poll_msg(poll_msg_t* msg, bool double_sided) {
 
     /* Retrieve poll reception timestamp. */
     uint64_t poll_rx_ts = get_rx_timestamp_u64();
+    pdec_radio_timing_rx_timestamp(poll_rx_ts);
 
     // en dtu (499.2MHz*128)
     uint32_t deltat = (POLL_RX_TO_RESP_TX_DLY_UUS * UUS_TO_DWT_TIME);
@@ -321,6 +325,7 @@ void handle_final_msg(final_msg_t* msg) {
         /* Retrieve poll transmission and response reception timestamps. See NOTE 9 below. */
         uint64_t resp_tx_ts = get_tx_timestamp_u64(); //should be the same as msg->resp_tx_ts, maybe more precise.
         uint64_t final_rx_ts = get_rx_timestamp_u64();
+        pdec_radio_timing_peer_turnaround(PDEC_TIMING_FINAL, resp_tx_ts, final_rx_ts);
         
         double RA = (double)wrap32_diff(msg->resp_rx_ts, msg->poll_tx_ts);
         double rA = (double)wrap32_diff(msg->final_tx_ts, msg->resp_rx_ts);

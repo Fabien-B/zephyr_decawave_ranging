@@ -48,6 +48,88 @@ USB transmission is buffered and nonblocking. If the host stops reading and the
 buffer fills, new binary frames are dropped whole; they are never partly queued.
 Output while DTR is deasserted is discarded.
 
+## RX-to-TX timing instrumentation
+
+Enable measurements on the initiator and on each responder using its shell:
+
+```text
+ranging timing reset
+ranging timing on
+uart binary
+```
+
+Run the host ranging test, stop it and close its serial connection. Enter the
+shell again (two Enters within one second), then inspect the accumulated data:
+
+```text
+ranging timing off
+ranging timing status
+```
+
+`ranging timing` also displays status. Instrumentation is off after reboot;
+`reset` clears counters without changing the enabled setting. Both paths are
+reported separately: RESPONSE is POLL reception to RESPONSE request on a
+responder; FINAL is RESPONSE reception to FINAL request on the initiator.
+
+Each path reports attempts, calls reaching `dwt_starttx()` (`samples`), failed
+starts, deadlines already past before setup (`expired`), and buffer-write
+failures. Per-operation min/average/max elapsed times identify where time is
+spent:
+
+- RX callback to TX function entry, including frame processing and token generation.
+- TX validation and the existing `SYS_TIME` read.
+- `forcetrxoff` and status clear when needed, TX buffer write and frame-control programming when changed.
+- Delayed-TX time programming.
+- `dwt_starttx()`, including its internal status checks.
+
+**Instrumentation adds zero SPI transactions.** Zephyr's high-resolution timing
+API uses the nRF52833's free-running TIMER2 at 16 MHz, which continues through SPI
+and thread waits. Each stage boundary captures that local timer. Conversions and
+statistics updates occur after TX arming, or after an early failure. No per-frame
+printing occurs. The timer is initialized once during radio startup and remains
+running; measurements are off after reboot.
+
+The RX timestamp and the single `SYS_TIME` read already required by TX setup
+provide the DW-clock anchor. The local timer brackets that existing read and
+`dwt_starttx()`, producing estimated lower/upper bounds on RX-to-TX-command time
+and remaining TX lead. These bounds account for uncertainty in where the DW
+clock was sampled within the read and where the fast command occurs inside the
+vendor driver. They include a 2-us rounding allowance; small cross-clock drift
+is not calibrated. The vendor driver remains unmodified. These are bounds on
+command delivery, not RF transmission timestamps. All output is in real us,
+independent of the protocol's configurable delay conversion constant.
+
+The two sides also report **observed peer turnaround**, reusing timestamps
+already read by ranging: the ranger measures POLL TX to RESPONSE RX; the rangee
+measures RESPONSE TX to FINAL RX. These on-air intervals include propagation in
+both directions and use one device clock, so the devices need no clock
+synchronization. They should be close to the peer's configured reply delay at
+short distances. They describe received replies only, and cannot identify a
+missing peer transmission. RESPONSE preparation is measured locally on the
+rangee; FINAL preparation is measured locally on the ranger. Collect both outputs
+for a full exchange, keeping delay, distance and traffic settings identical.
+
+`n` is the number of measurements contributing to each metric. Early failures
+only contribute to stages completed before failure. The peer-turnaround count
+may differ from the local attempt count, since it measures the other device.
+`off` retains statistics; `reset` clears them. An attempt already in progress
+may complete after either command.
+
+Compare TX lead bounds with the approximately 158-us advance requirement for
+128-symbol preamble/8-symbol SFD. If the bounds cross that threshold, the exact
+command delivery instant remains uncertain. The per-operation timings show which
+setup operations to optimize before trying shorter reply delays.
+
+RX-after-TX delay and hardware frame-wait timeout are fixed at zero during
+initialization/recovery, rather than rewritten for each frame. Manual
+single-buffer RX is explicitly configured: a successful RX leaves the receiver
+stopped, and the driver acknowledges status before the application callback.
+Replies from that callback skip redundant TRX-off and status cleanup. Queued TX
+from LISTENING and error recovery retain them. Frame-control settings are cached
+by length and ranging flag (offset is always zero), invalidated on recovery.
+Skipped operations may therefore show zero in the timing output. Frame length
+comes from the driver's callback metadata, avoiding another RX_FINFO read.
+
 ## Binary protocol
 
 Binary frames use this envelope:

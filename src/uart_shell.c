@@ -14,6 +14,7 @@
 #include "pdec_tdoa.h"
 #include "uart_protocol.h"
 #include "pdec_ranging.h"
+#include "pdec_radio.h"
 #include "pdec_database.h"
 
 #define PDEC_SHELL_RX_RING_SIZE 256
@@ -503,7 +504,75 @@ static int cmd_ranging_discovery(const struct shell *sh, size_t argc, char **arg
     return 0;
 }
 
+static void print_timing_metric(const struct shell *sh, const char *name,
+                                const struct pdec_radio_timing_metric *metric)
+{
+    if (metric->count == 0) { return; }
+    shell_print(sh, "  %s min/avg/max: %d/%lld/%d us (n=%u)", name,
+                (int)metric->min_us, (long long)(metric->total_us / metric->count),
+                (int)metric->max_us, metric->count);
+}
+
+static K_MUTEX_DEFINE(timing_report_lock);
+
+static int cmd_ranging_timing(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc > 2) {
+        shell_error(sh, "Usage: ranging timing [on|off|reset|status]");
+        return -EINVAL;
+    }
+    if (argc == 2) {
+        if (strcmp(argv[1], "on") == 0) {
+            pdec_radio_timing_enable(true);
+        } else if (strcmp(argv[1], "off") == 0) {
+            pdec_radio_timing_enable(false);
+        } else if (strcmp(argv[1], "reset") == 0) {
+            pdec_radio_timing_reset();
+        } else if (strcmp(argv[1], "status") != 0) {
+            shell_error(sh, "Usage: ranging timing [on|off|reset|status]");
+            return -EINVAL;
+        }
+    }
+
+    /* Keep the detailed snapshot off the small shell stack. Serialize readers
+     * on UART/USB without holding the radio statistics spinlock while printing.
+     */
+    static struct pdec_radio_timing_stats stats[PDEC_TIMING_PATH_COUNT];
+    k_mutex_lock(&timing_report_lock, K_FOREVER);
+    pdec_radio_timing_snapshot(stats);
+    static const char *const stages[PDEC_TIMING_STAGE_COUNT] = {
+        "RX callback->TX entry", "TX validation", "SYS_TIME read (existing)",
+        "forcetrxoff (if RX active)", "clear status (if RX active)", "write TX data",
+        "write frame control (if changed)", "set delayed TX time", "starttx incl. checks",
+    };
+    shell_print(sh, "RX/TX timing: %s (local elapsed timer + existing DW anchor; no added SPI)",
+                pdec_radio_timing_enabled() ? "on" : "off");
+    for (int i = 0; i < PDEC_TIMING_PATH_COUNT; i++) {
+        const struct pdec_radio_timing_stats *s = &stats[i];
+        shell_print(sh, "%s: attempts=%u samples=%u start_failures=%u expired=%u write_failures=%u",
+                    i == PDEC_TIMING_RESPONSE ? "RESPONSE" : "FINAL",
+                    s->attempts, s->samples, s->start_failures, s->expired, s->write_failures);
+        print_timing_metric(sh, "Observed peer turnaround (TX->RX)", &s->peer_turnaround);
+        if (s->attempts != 0) {
+            print_timing_metric(sh, "RX->DW anchor at TX entry", &s->rx_to_entry);
+            for (int j = 0; j < PDEC_TIMING_STAGE_COUNT; j++) {
+                print_timing_metric(sh, stages[j], &s->stage[j]);
+            }
+        }
+        if (s->samples == 0) {
+            continue;
+        }
+        print_timing_metric(sh, "RX->TX command lower bound", &s->rx_request_lower);
+        print_timing_metric(sh, "RX->TX command upper bound", &s->rx_request_upper);
+        print_timing_metric(sh, "TX command lead lower bound", &s->lead_lower);
+        print_timing_metric(sh, "TX command lead upper bound", &s->lead_upper);
+    }
+    k_mutex_unlock(&timing_report_lock);
+    return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_ranging,
+    SHELL_CMD(timing, NULL, "Measure RX to delayed-TX request: on|off|reset|status.", cmd_ranging_timing),
     SHELL_CMD(discovery, NULL, "Enable/disable discovery transmissions: on|off|status.", cmd_ranging_discovery),
     SHELL_CMD(range, NULL, "Perform ranging with target.", cmd_ranging_range),
     SHELL_CMD(get, NULL, "Get last known distance to a device.", cmd_ranging_get),

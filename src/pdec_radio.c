@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <string.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/timing/timing.h>
 #include <deca_device_api.h>
 
 #define RADIO_STACK_SIZE 2048
@@ -66,6 +67,130 @@ static int64_t state_deadline;
 static uint32_t active_request_id;
 static bool range_measured;
 static double measured_distance;
+static bool tx_control_valid;
+static uint16_t tx_control_len;
+static bool tx_control_ranging;
+
+static atomic_t timing_enabled;
+static struct k_spinlock timing_lock;
+static struct pdec_radio_timing_stats timing_stats[PDEC_TIMING_PATH_COUNT];
+static bool timing_rx_valid;
+static uint64_t timing_rx_timestamp;
+static timing_t timing_callback_start;
+static bool timing_rx_capture;
+
+void pdec_radio_timing_enable(bool enabled)
+{
+    atomic_set(&timing_enabled, enabled);
+}
+
+bool pdec_radio_timing_enabled(void)
+{
+    return atomic_get(&timing_enabled) != 0;
+}
+
+void pdec_radio_timing_reset(void)
+{
+    k_spinlock_key_t key = k_spin_lock(&timing_lock);
+    memset(timing_stats, 0, sizeof(timing_stats));
+    k_spin_unlock(&timing_lock, key);
+}
+
+void pdec_radio_timing_snapshot(struct pdec_radio_timing_stats stats[PDEC_TIMING_PATH_COUNT])
+{
+    k_spinlock_key_t key = k_spin_lock(&timing_lock);
+    memcpy(stats, timing_stats, sizeof(timing_stats));
+    k_spin_unlock(&timing_lock, key);
+}
+
+void pdec_radio_timing_rx_timestamp(uint64_t timestamp)
+{
+    pdec_radio_assert_owner();
+    timing_rx_timestamp = timestamp;
+    timing_rx_valid = true;
+}
+
+/* Actual microseconds, independent of the protocol's configurable UUS constant.
+ * DW clock = 499.2 MHz * 128 = 63897.6 ticks/us. Handle 40-bit wrap.
+ */
+static int32_t timing_diff_us(uint64_t a, uint64_t b)
+{
+    int64_t ticks = (a - b) & DW_TIME_MASK;
+    if (ticks & (1ULL << 39)) {
+        ticks -= 1LL << 40;
+    }
+    return (int32_t)(ticks * 5 / 319488);
+}
+
+static void timing_metric_add(struct pdec_radio_timing_metric *metric, int32_t us)
+{
+    if (metric->count == 0 || us < metric->min_us) { metric->min_us = us; }
+    if (metric->count == 0 || us > metric->max_us) { metric->max_us = us; }
+    metric->total_us += us;
+    metric->count++;
+}
+
+static int32_t timing_elapsed_us(timing_t start, timing_t end)
+{
+    return (int32_t)(timing_cycles_to_ns(timing_cycles_get(&start, &end)) / 1000);
+}
+
+void pdec_radio_timing_peer_turnaround(enum pdec_radio_timing_path path,
+                                      uint64_t tx, uint64_t rx)
+{
+    pdec_radio_assert_owner();
+    if (!pdec_radio_timing_enabled()) { return; }
+    int32_t us = timing_diff_us(rx, tx);
+    k_spinlock_key_t key = k_spin_lock(&timing_lock);
+    timing_metric_add(&timing_stats[path].peer_turnaround, us);
+    k_spin_unlock(&timing_lock, key);
+}
+
+/* points bound each consecutive stage, starting at RX callback entry. */
+static void timing_record(enum pdec_radio_timing_path path, uint64_t rx,
+                          uint64_t entry, uint64_t deadline, timing_t *points,
+                          unsigned int completed, int result)
+{
+    int32_t stage_us[PDEC_TIMING_STAGE_COUNT];
+    for (unsigned int i = 0; i < completed; i++) {
+        stage_us[i] = timing_elapsed_us(points[i], points[i + 1]);
+    }
+    int32_t entry_us = timing_diff_us(entry, rx);
+    int32_t lead_at_entry = timing_diff_us(deadline, entry);
+    int32_t lower = 0, upper = 0;
+    bool started = completed == PDEC_TIMING_STAGE_COUNT;
+    if (started) {
+        /* The existing SYS_TIME register was sampled somewhere between its
+         * local before/after marks. Bound the fast command inside starttx().
+         * No additional SPI reads, or per-stage conversions before TX arming.
+         */
+        lower = timing_elapsed_us(points[PDEC_TIMING_SYS_TIME + 1],
+                                  points[PDEC_TIMING_START_TX]);
+        upper = timing_elapsed_us(points[PDEC_TIMING_SYS_TIME],
+                                  points[PDEC_TIMING_START_TX + 1]) + 2;
+        /* Allow for the two integer-us roundings at the clock anchor. */
+    }
+    k_spinlock_key_t key = k_spin_lock(&timing_lock);
+    struct pdec_radio_timing_stats *stats = &timing_stats[path];
+    timing_metric_add(&stats->rx_to_entry, entry_us);
+    for (unsigned int i = 0; i < completed; i++) {
+        timing_metric_add(&stats->stage[i], stage_us[i]);
+    }
+    stats->attempts++;
+    if (started) {
+        timing_metric_add(&stats->rx_request_lower, entry_us + lower);
+        timing_metric_add(&stats->rx_request_upper, entry_us + upper);
+        timing_metric_add(&stats->lead_lower, lead_at_entry - upper);
+        timing_metric_add(&stats->lead_upper, lead_at_entry - lower + 2);
+        stats->samples++;
+        stats->start_failures += result != DWT_SUCCESS;
+    } else if (result == -ETIMEDOUT) {
+        stats->expired++;
+    } else {
+        stats->write_failures++;
+    }
+    k_spin_unlock(&timing_lock, key);
+}
 
 static void finish_request(int result)
 {
@@ -117,7 +242,6 @@ enum pdec_exchange_phase pdec_radio_get_exchange(void)
 
 static int enable_rx(void)
 {
-    dwt_setrxtimeout(0);
     if (dwt_rxenable(DWT_START_RX_IMMEDIATE) != DWT_SUCCESS) {
         return -EIO;
     }
@@ -133,7 +257,9 @@ static void recover_radio(int result)
     finish_request(result);
     dwt_forcetrxoff();
     dwt_writesysstatuslo(DWT_INT_RX | DWT_INT_TXFRS_BIT_MASK);
+    tx_control_valid = false;
     dwt_setrxaftertxdelay(0);
+    dwt_setrxtimeout(0);
     if (enable_rx() != 0) {
         state_deadline = deadline_after_us(RECOVERY_RETRY_MS * 1000);
     }
@@ -150,6 +276,9 @@ bool pdec_radio_rx_begin(void)
         expire_exchange();
     }
     radio_state = PDEC_RADIO_PROCESSING_RX;
+    timing_rx_valid = false;
+    timing_rx_capture = pdec_radio_timing_enabled();
+    if (timing_rx_capture) { timing_callback_start = timing_counter_get(); }
     return true;
 }
 
@@ -232,6 +361,8 @@ void pdec_radio_complete_exchange(void)
 int pdec_radio_transmit(const void *frame, uint16_t len, bool ranging,
                         bool delayed, uint64_t deadline)
 {
+    timing_t setup_entry = delayed && timing_rx_capture && pdec_radio_timing_enabled()
+        ? timing_counter_get() : 0;
     pdec_radio_assert_owner();
     if (frame == NULL || len < sizeof(frame_header_t) + 2 || len > FRAME_LEN_MAX) {
         return -EINVAL;
@@ -254,33 +385,76 @@ int pdec_radio_transmit(const void *frame, uint16_t len, bool ranging,
         return -EINVAL;
     }
 
+    bool measure = delayed && radio_state == PDEC_RADIO_PROCESSING_RX &&
+        timing_rx_valid && timing_rx_capture && pdec_radio_timing_enabled() &&
+        (final || header->frame_role == DF_DS_RANGING_RESP ||
+         header->frame_role == DF_SS_RANGING_RESP);
+    enum pdec_radio_timing_path timing_path = final ? PDEC_TIMING_FINAL : PDEC_TIMING_RESPONSE;
+    timing_t points[PDEC_TIMING_STAGE_COUNT + 1];
+    if (measure) {
+        points[0] = timing_callback_start;
+        points[PDEC_TIMING_TX_VALIDATION] = setup_entry;
+        points[PDEC_TIMING_SYS_TIME] = timing_counter_get();
+    }
+    uint64_t timing_entry = 0;
     uint64_t wait_us = 0;
     if (delayed) {
         uint64_t now = get_systime_u64() << 8;
+        if (measure) { points[PDEC_TIMING_SYS_TIME + 1] = timing_counter_get(); }
+        timing_entry = now;
         uint64_t dt = (deadline - now) & DW_TIME_MASK;
         if (dt & (1ULL << 39)) {
+            if (measure) {
+                timing_record(timing_path, timing_rx_timestamp, timing_entry, deadline,
+                              points, PDEC_TIMING_SYS_TIME + 1, -ETIMEDOUT);
+            }
             recover_radio(-ETIMEDOUT);
             return -ETIMEDOUT;
         }
         wait_us = dt / UUS_TO_DWT_TIME;
     }
 
+    /* The real RXOK callback runs after status acknowledgement, with manual
+     * single-buffer RX stopped. LISTENING may still be receiving a frame.
+     */
+    bool rx_callback = radio_state == PDEC_RADIO_PROCESSING_RX;
     radio_state = PDEC_RADIO_WAIT_TX_DONE;
-    dwt_forcetrxoff();
-    dwt_writesysstatuslo(DWT_INT_RX | DWT_INT_TXFRS_BIT_MASK);
-    if (dwt_writetxdata(len, (uint8_t *)frame, 0) != DWT_SUCCESS) {
+    if (!rx_callback) { dwt_forcetrxoff(); }
+    if (measure) { points[PDEC_TIMING_TRX_OFF + 1] = timing_counter_get(); }
+    if (!rx_callback) { dwt_writesysstatuslo(DWT_INT_RX | DWT_INT_TXFRS_BIT_MASK); }
+    if (measure) { points[PDEC_TIMING_CLEAR_STATUS + 1] = timing_counter_get(); }
+    int write_result = dwt_writetxdata(len, (uint8_t *)frame, 0);
+    if (measure) { points[PDEC_TIMING_WRITE_DATA + 1] = timing_counter_get(); }
+    if (write_result != DWT_SUCCESS) {
+        if (measure) {
+            timing_record(timing_path, timing_rx_timestamp, timing_entry, deadline,
+                          points, PDEC_TIMING_WRITE_DATA + 1, -EIO);
+        }
         recover_radio(-EIO);
         return -EIO;
     }
-    dwt_writetxfctrl(len, 0, ranging);
+    /* Only this owner writes TX_FCTRL, always with buffer offset zero. */
+    if (!tx_control_valid || tx_control_len != len || tx_control_ranging != ranging) {
+        dwt_writetxfctrl(len, 0, ranging);
+        tx_control_valid = true;
+        tx_control_len = len;
+        tx_control_ranging = ranging;
+    }
+    if (measure) { points[PDEC_TIMING_FRAME_CONTROL + 1] = timing_counter_get(); }
     if (delayed) {
         dwt_setdelayedtrxtime((uint32_t)(deadline >> 8));
     }
-    dwt_setrxaftertxdelay(0);
-    dwt_setrxtimeout(0);
+    if (measure) { points[PDEC_TIMING_DELAY_TIME + 1] = timing_counter_get(); }
     uint8_t mode = (delayed ? DWT_START_TX_DELAYED : DWT_START_TX_IMMEDIATE)
                  | DWT_RESPONSE_EXPECTED;
-    if (dwt_starttx(mode) != DWT_SUCCESS) {
+    if (measure) { points[PDEC_TIMING_START_TX] = timing_counter_get(); }
+    int tx_result = dwt_starttx(mode);
+    if (measure) {
+        points[PDEC_TIMING_START_TX + 1] = timing_counter_get();
+        timing_record(timing_path, timing_rx_timestamp, timing_entry, deadline,
+                      points, PDEC_TIMING_STAGE_COUNT, tx_result);
+    }
+    if (tx_result != DWT_SUCCESS) {
         recover_radio(-EIO);
         return -EIO;
     }
@@ -356,8 +530,14 @@ static void radio_thread(void *p1, void *p2, void *p3)
     ARG_UNUSED(p2);
     ARG_UNUSED(p3);
 
+    /* Nordic timing uses a free-running TIMER2, including SPI/thread waits. */
+    timing_init();
+    timing_start();
     radio_init_result = pdec_radio_hw_init(&radio_device_id);
     if (radio_init_result == 0) {
+        /* Fixed settings: protocol deadlines are software-owned. */
+        dwt_setrxaftertxdelay(0);
+        dwt_setrxtimeout(0);
         radio_init_result = enable_rx();
     }
     if (radio_init_result == 0) {

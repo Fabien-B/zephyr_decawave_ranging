@@ -20,7 +20,7 @@
 #include "app_print.h"
 
 static void handle_com_msg(const com_msg_t *msg, uint16_t rx_frame_len);
-static void process_rx_ok(void);
+static void process_rx_ok(uint16_t frame_len);
 
 /* Called synchronously by dwt_isr(), exclusively in the radio owner thread. */
 static void rx_error(const dwt_cb_data_t *data)
@@ -47,7 +47,7 @@ static void rx_ok(const dwt_cb_data_t *data)
         return;
     }
     if (pdec_radio_rx_begin()) {
-        process_rx_ok();
+        process_rx_ok(data->datalength);
         pdec_radio_rx_end();
     }
 }
@@ -107,14 +107,9 @@ static void handle_com_msg(const com_msg_t *msg, uint16_t rx_frame_len)
     publish_com_event(msg->header.src_id, msg->payload, len);
 }
 
-static void process_rx_ok(void)
+static void process_rx_ok(uint16_t frame_len)
 {
-    uint8_t rng;
-    
-    uint16_t frame_len = dwt_getframelength(&rng);
-
-    // to check if the range bit is set: rng & DWT_CB_DATA_RX_FLAG_RNG
-
+    /* The driver already read RX_FINFO and validated this callback's length. */
     if (frame_len < sizeof(frame_header_t) + 2 || frame_len > sizeof(rx_msg)) {
         return;
     }
@@ -296,6 +291,11 @@ int pdec_radio_hw_init(uint32_t *dev_id)
     if (ret != DWT_SUCCESS) {
         return ret;
     }
+
+    /* RX callbacks consume the sole buffer while the receiver is stopped.
+     * Reply TX can therefore be armed without another TRX-off/status cleanup.
+     */
+    dwt_setdblrxbuffmode(DBL_BUF_STATE_DIS, DBL_BUF_MODE_MAN);
     
     /* Only completion and handled terminal errors. Keep standalone CIAERR
      * masked: the unmodified driver does not handle FINT_STAT_RXTSERR.

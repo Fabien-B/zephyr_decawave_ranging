@@ -56,3 +56,45 @@ int pdec_radio_transmit(const void *frame, uint16_t len, bool ranging,
 /* Requested polls carry a host-side identity; ordinary submit_poll uses zero. */
 int pdec_radio_submit_range(uint16_t dst_id, bool double_sided, uint32_t request_id);
 void pdec_radio_range_measured(double distance);
+
+/* Runtime instrumentation; no SPI access from shell/snapshot callers. */
+enum pdec_radio_timing_path {
+    PDEC_TIMING_RESPONSE,
+    PDEC_TIMING_FINAL,
+    PDEC_TIMING_PATH_COUNT,
+};
+enum pdec_radio_timing_stage {
+    PDEC_TIMING_RX_PROCESSING,
+    PDEC_TIMING_TX_VALIDATION,
+    PDEC_TIMING_SYS_TIME,
+    PDEC_TIMING_TRX_OFF,
+    PDEC_TIMING_CLEAR_STATUS,
+    PDEC_TIMING_WRITE_DATA,
+    PDEC_TIMING_FRAME_CONTROL,
+    PDEC_TIMING_DELAY_TIME,
+    PDEC_TIMING_START_TX,
+    PDEC_TIMING_STAGE_COUNT,
+};
+struct pdec_radio_timing_metric {
+    int32_t min_us, max_us;
+    int64_t total_us;
+    uint32_t count;
+};
+struct pdec_radio_timing_stats {
+    uint32_t attempts, samples, start_failures, expired, write_failures;
+    struct pdec_radio_timing_metric rx_to_entry;
+    /* Bounds on the fast TX command, from one existing DW-clock anchor. */
+    struct pdec_radio_timing_metric rx_request_lower, rx_request_upper;
+    struct pdec_radio_timing_metric lead_lower, lead_upper;
+    struct pdec_radio_timing_metric peer_turnaround;
+    struct pdec_radio_timing_metric stage[PDEC_TIMING_STAGE_COUNT];
+};
+void pdec_radio_timing_enable(bool enabled);
+bool pdec_radio_timing_enabled(void);
+void pdec_radio_timing_reset(void);
+void pdec_radio_timing_snapshot(struct pdec_radio_timing_stats stats[PDEC_TIMING_PATH_COUNT]);
+/* Owner only: reuse the timestamp already read by the protocol handler. */
+void pdec_radio_timing_rx_timestamp(uint64_t timestamp);
+/* Reuse existing TX/RX stamps to observe the peer's on-air turnaround. */
+void pdec_radio_timing_peer_turnaround(enum pdec_radio_timing_path path,
+                                      uint64_t tx, uint64_t rx);
