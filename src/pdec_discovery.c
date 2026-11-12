@@ -4,6 +4,7 @@
 #include <stdbool.h>
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
 
 #include "pdec_database.h"
 
@@ -15,6 +16,17 @@
 K_THREAD_STACK_DEFINE(discovery_stack_area, DISCOVERY_STACK_SIZE);
 static struct k_thread discovery_thread_data;
 static bool discovery_thread_started;
+static atomic_t discovery_enabled = ATOMIC_INIT(1);
+
+void pdec_discovery_set_enabled(bool enabled)
+{
+    atomic_set(&discovery_enabled, enabled);
+}
+
+bool pdec_discovery_is_enabled(void)
+{
+    return atomic_get(&discovery_enabled) != 0;
+}
 
 static void discovery_thread(void *p1, void *p2, void *p3)
 {
@@ -46,6 +58,9 @@ int pdec_discovery_start(void)
 
 int pdec_discovery_send_now(void)
 {
+    if (!pdec_discovery_is_enabled()) {
+        return -EACCES;
+    }
     return pdec_radio_submit_discovery();
 }
 

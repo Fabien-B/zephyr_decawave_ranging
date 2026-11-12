@@ -19,14 +19,45 @@
 
 #include "app_print.h"
 
-static void cbTxDone(const dwt_cb_data_t *cb_data);
-static void cbRxOk(const dwt_cb_data_t *cb_data);
-static void cbRxTo(const dwt_cb_data_t *cb_data);
-static void cbRxErr(const dwt_cb_data_t *cb_data);
 static void handle_com_msg(const com_msg_t *msg, uint16_t rx_frame_len);
 static void process_rx_ok(void);
 
+/* Called synchronously by dwt_isr(), exclusively in the radio owner thread. */
+static void rx_error(const dwt_cb_data_t *data)
+{
+    ARG_UNUSED(data);
+    pdec_radio_rx_error();
+}
 
+static void tx_done(const dwt_cb_data_t *data)
+{
+    ARG_UNUSED(data);
+    pdec_radio_tx_done();
+}
+
+static void rx_ok(const dwt_cb_data_t *data)
+{
+    /* A correct CRC does not guarantee a usable RX timestamp. Discard before
+     * decoding, clock-offset updates, ranging, or TDOA can consume it.
+     * CPER is defensive: STS is currently off in this application.
+     */
+    if ((data->rx_flags & (DWT_CB_DATA_RX_FLAG_CER | DWT_CB_DATA_RX_FLAG_CPER)) != 0 ||
+        (data->status & (DWT_INT_CIAERR_BIT_MASK | DWT_INT_CPERR_BIT_MASK)) != 0) {
+        pdec_radio_rx_error();
+        return;
+    }
+    if (pdec_radio_rx_begin()) {
+        process_rx_ok();
+        pdec_radio_rx_end();
+    }
+}
+
+static dwt_callbacks_s callbacks = {
+    .cbTxDone = tx_done,
+    .cbRxOk = rx_ok,
+    .cbRxTo = rx_error,
+    .cbRxErr = rx_error,
+};
 
 dwt_config_t config = {
     5,                /* Channel number. */
@@ -56,21 +87,6 @@ dwt_txconfig_t txconfig_options = {
 };
 
 
-dwt_callbacks_s dw_callbacks = {
-    .cbTxDone = cbTxDone,
-    .cbRxOk = cbRxOk,
-    .cbRxTo = cbRxTo,
-    .cbRxErr = cbRxErr,
-    .cbSPIErr = NULL,
-    .cbSPIRDErr = NULL,
-    .cbSPIRdy = NULL,
-    .cbDualSPIEv = NULL,
-    .cbFrmRdy = NULL,
-    .cbCiaDone = NULL,
-    .devErr = NULL,
-    .cbSysEvent = NULL,
-};
-
 /* Frame sequence number, incremented after each transmission. */
 uint8_t frame_seq_nb = 0;
 
@@ -78,25 +94,6 @@ static union ranging_msg_u rx_msg;
 
 
 extern const struct gpio_dt_spec led;
-
-/* Called synchronously by dwt_isr(), exclusively in the radio thread. */
-static void cbRxTo(const dwt_cb_data_t *cb_data)
-{
-    ARG_UNUSED(cb_data);
-    pdec_radio_rx_error();
-}
-
-static void cbRxErr(const dwt_cb_data_t *cb_data)
-{
-    ARG_UNUSED(cb_data);
-    pdec_radio_rx_error();
-}
-
-static void cbTxDone(const dwt_cb_data_t *cb_data)
-{
-    ARG_UNUSED(cb_data);
-    pdec_radio_tx_done();
-}
 
 static void handle_com_msg(const com_msg_t *msg, uint16_t rx_frame_len)
 {
@@ -202,16 +199,6 @@ static void process_rx_ok(void)
 
 }
 
-static void cbRxOk(const dwt_cb_data_t *cb_data)
-{
-    ARG_UNUSED(cb_data);
-
-    if (pdec_radio_rx_begin()) {
-        process_rx_ok();
-        pdec_radio_rx_end();
-    }
-}
-
 void send_data_msg(uint16_t dst_id, uint8_t* buffer, uint8_t len) {
     (void)pdec_radio_submit_data(dst_id, buffer, len);
 }
@@ -274,7 +261,7 @@ int pdec_radio_hw_init(uint32_t *dev_id)
     if (ret != DWT_SUCCESS) {
         return ret;
     }
-    dwt_setcallbacks(&dw_callbacks);
+    dwt_setcallbacks(&callbacks);
 
     k_sleep(K_MSEC(500));
 
@@ -310,16 +297,16 @@ int pdec_radio_hw_init(uint32_t *dev_id)
         return ret;
     }
     
+    /* Only completion and handled terminal errors. Keep standalone CIAERR
+     * masked: the unmodified driver does not handle FINT_STAT_RXTSERR.
+     * CIAERR accompanying RXOK is still checked by rx_ok().
+     */
     dwt_setinterrupt(
-        DWT_INT_TXFRS_BIT_MASK   |  // TX done
-        DWT_INT_RXFCG_BIT_MASK   |  // RX OK
-        DWT_INT_RXFCE_BIT_MASK   |  // CRC error
-        DWT_INT_RXFTO_BIT_MASK   |  // RX timeout
-        DWT_INT_RXSTO_BIT_MASK   |  // SFD timeout
-        DWT_INT_RXPHE_BIT_MASK,     // PHY header error
-        0,
-        DWT_ENABLE_INT
-    );
+        DWT_INT_TXFRS_BIT_MASK | DWT_INT_RXFCG_BIT_MASK |
+        DWT_INT_RXFCE_BIT_MASK | DWT_INT_RXFSL_BIT_MASK | DWT_INT_RXPHE_BIT_MASK |
+        DWT_INT_RXFTO_BIT_MASK | DWT_INT_RXSTO_BIT_MASK | DWT_INT_RXPTO_BIT_MASK |
+        DWT_INT_ARFE_BIT_MASK,
+        0, DWT_ENABLE_INT);
 
 
     /* Configure the TX spectrum parameters (power PG delay and PG Count) */

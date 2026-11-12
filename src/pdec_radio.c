@@ -1,4 +1,6 @@
 #include "pdec_radio.h"
+#include "pdec_range_request.h"
+#include "pdec_discovery.h"
 
 #include <errno.h>
 #include <string.h>
@@ -22,6 +24,7 @@ struct radio_command {
         struct {
             uint16_t dst_id;
             bool double_sided;
+            uint32_t request_id;
         } poll;
         struct {
             uint16_t dst_id;
@@ -60,6 +63,40 @@ static struct {
     int64_t deadline;
 } exchange;
 static int64_t state_deadline;
+static uint32_t active_request_id;
+static bool range_measured;
+static double measured_distance;
+
+static void finish_request(int result)
+{
+    uint32_t id = active_request_id;
+    active_request_id = 0;
+    range_measured = false;
+    if (id != 0) {
+        pdec_range_request_complete(id, result, measured_distance);
+    }
+}
+
+static void expire_exchange(void)
+{
+    exchange.phase = PDEC_EXCHANGE_NONE;
+    finish_request(-ETIMEDOUT);
+}
+
+void pdec_radio_range_measured(double distance)
+{
+    pdec_radio_assert_owner();
+    if (active_request_id == 0) {
+        return;
+    }
+    measured_distance = distance;
+    range_measured = true;
+    /* SS completes at the response; DS waits until its final has transmitted. */
+    if (exchange.phase == PDEC_EXCHANGE_NONE &&
+        (radio_state == PDEC_RADIO_LISTENING || radio_state == PDEC_RADIO_PROCESSING_RX)) {
+        finish_request(0);
+    }
+}
 
 static int64_t deadline_after_us(uint64_t us)
 {
@@ -89,10 +126,11 @@ static int enable_rx(void)
     return 0;
 }
 
-static void recover_radio(void)
+static void recover_radio(int result)
 {
     radio_state = PDEC_RADIO_RECOVERING;
     exchange.phase = PDEC_EXCHANGE_NONE;
+    finish_request(result);
     dwt_forcetrxoff();
     dwt_writesysstatuslo(DWT_INT_RX | DWT_INT_TXFRS_BIT_MASK);
     dwt_setrxaftertxdelay(0);
@@ -109,7 +147,7 @@ bool pdec_radio_rx_begin(void)
     }
     if (exchange.phase != PDEC_EXCHANGE_NONE &&
         k_uptime_ticks() >= exchange.deadline) {
-        exchange.phase = PDEC_EXCHANGE_NONE;
+        expire_exchange();
     }
     radio_state = PDEC_RADIO_PROCESSING_RX;
     return true;
@@ -120,7 +158,7 @@ void pdec_radio_rx_end(void)
     pdec_radio_assert_owner();
     /* A handler may have armed TX or entered recovery. Do not undo it. */
     if (radio_state == PDEC_RADIO_PROCESSING_RX && enable_rx() != 0) {
-        recover_radio();
+        recover_radio(-EIO);
     }
 }
 
@@ -135,6 +173,8 @@ void pdec_radio_tx_done(void)
     state_deadline = 0;
     if (exchange.phase != PDEC_EXCHANGE_NONE) {
         exchange.deadline = deadline_after_us(EXCHANGE_TIMEOUT_US);
+    } else if (range_measured) {
+        finish_request(0);
     }
 }
 
@@ -150,7 +190,7 @@ void pdec_radio_rx_error(void)
     if (radio_state == PDEC_RADIO_LISTENING ||
         radio_state == PDEC_RADIO_PROCESSING_RX) {
         if (enable_rx() != 0) {
-            recover_radio();
+            recover_radio(-EIO);
         }
     }
 }
@@ -219,7 +259,7 @@ int pdec_radio_transmit(const void *frame, uint16_t len, bool ranging,
         uint64_t now = get_systime_u64() << 8;
         uint64_t dt = (deadline - now) & DW_TIME_MASK;
         if (dt & (1ULL << 39)) {
-            recover_radio();
+            recover_radio(-ETIMEDOUT);
             return -ETIMEDOUT;
         }
         wait_us = dt / UUS_TO_DWT_TIME;
@@ -229,7 +269,7 @@ int pdec_radio_transmit(const void *frame, uint16_t len, bool ranging,
     dwt_forcetrxoff();
     dwt_writesysstatuslo(DWT_INT_RX | DWT_INT_TXFRS_BIT_MASK);
     if (dwt_writetxdata(len, (uint8_t *)frame, 0) != DWT_SUCCESS) {
-        recover_radio();
+        recover_radio(-EIO);
         return -EIO;
     }
     dwt_writetxfctrl(len, 0, ranging);
@@ -241,7 +281,7 @@ int pdec_radio_transmit(const void *frame, uint16_t len, bool ranging,
     uint8_t mode = (delayed ? DWT_START_TX_DELAYED : DWT_START_TX_IMMEDIATE)
                  | DWT_RESPONSE_EXPECTED;
     if (dwt_starttx(mode) != DWT_SUCCESS) {
-        recover_radio();
+        recover_radio(-EIO);
         return -EIO;
     }
 
@@ -266,13 +306,13 @@ static bool expire_deadlines(void)
 {
     int64_t now = k_uptime_ticks();
     if (state_deadline != 0 && now >= state_deadline) {
-        recover_radio();
+        recover_radio(-ETIMEDOUT);
         return true;
     }
     if (radio_state == PDEC_RADIO_LISTENING &&
         exchange.phase != PDEC_EXCHANGE_NONE && now >= exchange.deadline) {
         /* This is a protocol timeout: RX is already on, do not interrupt it. */
-        exchange.phase = PDEC_EXCHANGE_NONE;
+        expire_exchange();
     }
     return false;
 }
@@ -337,7 +377,7 @@ static void radio_thread(void *p1, void *p2, void *p3)
         unsigned int irq_count = 0;
         while (radio_state != PDEC_RADIO_RECOVERING && pdec_dw3000_irq_active()) {
             if (++irq_count > IRQ_DRAIN_LIMIT) {
-                recover_radio();
+                recover_radio(-EIO);
                 /* An unhandled/stuck IRQ must not spin a cooperative thread. */
                 radio_state = PDEC_RADIO_RECOVERING;
                 state_deadline = deadline_after_us(RECOVERY_RETRY_MS * 1000);
@@ -363,7 +403,17 @@ static void radio_thread(void *p1, void *p2, void *p3)
 
         switch (event.kind) {
         case RADIO_COMMAND_SEND_POLL:
+            if (event.poll.request_id != 0 &&
+                !pdec_range_request_is_pending(event.poll.request_id)) {
+                break; /* Caller timed out while this command was queued. */
+            }
+            active_request_id = event.poll.request_id;
+            range_measured = false;
+            measured_distance = 0;
             send_poll_now(event.poll.dst_id, event.poll.double_sided);
+            if (radio_state != PDEC_RADIO_WAIT_TX_DONE) {
+                finish_request(-EIO);
+            }
             break;
         case RADIO_COMMAND_SEND_DATA:
             pdec_radio_send_data_now(event.data.dst_id, event.data.payload, event.data.len);
@@ -372,7 +422,10 @@ static void radio_thread(void *p1, void *p2, void *p3)
             send_sync_now();
             break;
         case RADIO_COMMAND_SEND_DISCOVERY:
-            send_discovery_now();
+            /* Also discard discoveries queued before the user disabled them. */
+            if (pdec_discovery_is_enabled()) {
+                send_discovery_now();
+            }
             break;
         }
     }
@@ -395,11 +448,17 @@ int pdecInit(uint32_t *dev_id)
 
 int pdec_radio_submit_poll(uint16_t dst_id, bool double_sided)
 {
+    return pdec_radio_submit_range(dst_id, double_sided, 0);
+}
+
+int pdec_radio_submit_range(uint16_t dst_id, bool double_sided, uint32_t request_id)
+{
     struct radio_command event = {
         .kind = RADIO_COMMAND_SEND_POLL,
         .poll = {
             .dst_id = dst_id,
             .double_sided = double_sided,
+            .request_id = request_id,
         },
     };
 

@@ -221,3 +221,19 @@ Return the UART protocol to binary mode:
 ```text
 uart binary
 ```
+
+## Discovery transmissions during ranging tests
+
+Each module transmits a discovery HELLO every two seconds by default. From the
+shell of each module, inspect or change that module's setting:
+
+```text
+ranging discovery status
+ranging discovery off
+ranging discovery on
+```
+
+Disabling affects outgoing discovery only. Received frames still update the
+local database. Discoveries queued before `off` are discarded when dispatched;
+a command already being dispatched is allowed to finish. The setting is volatile and
+returns to `on` at reboot. Enabling resumes periodic transmissions.

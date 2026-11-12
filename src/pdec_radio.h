@@ -52,3 +52,7 @@ void pdec_radio_complete_exchange(void);
 /* deadline is a 40-bit DW timestamp (not shifted), ignored for immediate TX. */
 int pdec_radio_transmit(const void *frame, uint16_t len, bool ranging,
                         bool delayed, uint64_t deadline);
+
+/* Requested polls carry a host-side identity; ordinary submit_poll uses zero. */
+int pdec_radio_submit_range(uint16_t dst_id, bool double_sided, uint32_t request_id);
+void pdec_radio_range_measured(double distance);

@@ -35,12 +35,6 @@ static bool monitor_running;
 static enum ranging_monitor_scope monitor_scope = RANGING_MONITOR_SCOPE_LOCAL;
 #define ASCII_CTRL_C 0x03
 
-struct pending_range_request {
-    bool active;
-    uint16_t dst_id;
-    double distance;
-};
-
 enum ranging_event_kind {
     RANGING_EVENT_KIND_SS = 0,
     RANGING_EVENT_KIND_DS,
@@ -74,11 +68,6 @@ struct result_event {
 
 K_MSGQ_DEFINE(monitor_queue, sizeof(struct ranging_event), MONITOR_QUEUE_LEN, 8);
 K_MSGQ_DEFINE(result_queue, sizeof(struct result_event), RESULT_QUEUE_LEN, 8);
-static struct pending_range_request pending_range;
-static K_MUTEX_DEFINE(pending_range_lock);
-static K_SEM_DEFINE(pending_range_done, 0, 1);
-
-
 // delay between frame RX, and the delayed TX
 #define POLL_RX_TO_RESP_TX_DLY_UUS 1500
 
@@ -129,26 +118,6 @@ static bool should_print_event(const struct ranging_event *event)
     return event->src_id == my_id || event->dst_id == my_id;
 }
 
-static void complete_pending_range(uint16_t src_id, uint16_t dst_id, double distance,
-                                   enum ranging_event_kind kind)
-{
-    if (kind == RANGING_EVENT_KIND_IN) {
-        return;
-    }
-
-    uint16_t my_id = get_my_id();
-
-    k_mutex_lock(&pending_range_lock, K_FOREVER);
-    if (pending_range.active &&
-        ((src_id == my_id && dst_id == pending_range.dst_id) ||
-         (dst_id == my_id && src_id == pending_range.dst_id))) {
-        pending_range.distance = distance;
-        pending_range.active = false;
-        k_sem_give(&pending_range_done);
-    }
-    k_mutex_unlock(&pending_range_lock);
-}
-
 static void publish_ranging_event(uint16_t src_id, uint16_t dst_id, double distance,
                                   enum ranging_event_kind kind)
 {
@@ -161,10 +130,6 @@ static void publish_ranging_event(uint16_t src_id, uint16_t dst_id, double dista
             .kind = kind,
         },
     };
-
-    if (kind != RANGING_EVENT_KIND_STOP) {
-        complete_pending_range(src_id, dst_id, distance, kind);
-    }
 
     (void)k_msgq_put(&result_queue, &event, K_NO_WAIT);
 }
@@ -294,6 +259,7 @@ void handle_resp_msg(resp_msg_t* msg, bool double_sided) {
         pdec_radio_complete_exchange();
     }
 
+    pdec_radio_range_measured(distance);
     set_distance(get_my_id(), msg->header.src_id, distance);
     publish_ranging_event(get_my_id(), msg->header.src_id, distance, RANGING_EVENT_KIND_SS);
 
@@ -387,45 +353,6 @@ void handle_final_msg(final_msg_t* msg) {
 #endif
     }
 
-}
-
-int request_range(uint16_t dst_id, bool double_sided, double *distance, k_timeout_t timeout)
-{
-    k_mutex_lock(&pending_range_lock, K_FOREVER);
-    if (pending_range.active) {
-        k_mutex_unlock(&pending_range_lock);
-        return -EBUSY;
-    }
-
-    pending_range.active = true;
-    pending_range.dst_id = dst_id;
-    pending_range.distance = -1.0;
-    k_sem_reset(&pending_range_done);
-    k_mutex_unlock(&pending_range_lock);
-
-    int ret = send_poll(dst_id, double_sided);
-    if (ret != 0) {
-        k_mutex_lock(&pending_range_lock, K_FOREVER);
-        pending_range.active = false;
-        k_mutex_unlock(&pending_range_lock);
-        return ret;
-    }
-
-    ret = k_sem_take(&pending_range_done, timeout);
-    if (ret != 0) {
-        k_mutex_lock(&pending_range_lock, K_FOREVER);
-        pending_range.active = false;
-        k_mutex_unlock(&pending_range_lock);
-        return -ETIMEDOUT;
-    }
-
-    if (distance != NULL) {
-        k_mutex_lock(&pending_range_lock, K_FOREVER);
-        *distance = pending_range.distance;
-        k_mutex_unlock(&pending_range_lock);
-    }
-
-    return 0;
 }
 
 int send_poll(uint16_t dst_id, bool double_sided)

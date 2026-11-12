@@ -23,6 +23,7 @@ target_sources(app PRIVATE
     src/pdec_initiator.c
     src/pdec_database.c
     src/pdec_ranging.c
+    src/pdec_range_request.c
     src/pdec_tdoa.c
     src/uart_binary.c
     src/uart_protocol.c

@@ -10,6 +10,7 @@
 
 #include "pdec_common.h"
 #include "pdec_initiator.h"
+#include "pdec_discovery.h"
 #include "pdec_tdoa.h"
 #include "uart_protocol.h"
 #include "pdec_ranging.h"
@@ -459,7 +460,29 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_ranging_continuous,
     SHELL_SUBCMD_SET_END
 );
 
+static int cmd_ranging_discovery(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc > 2) {
+        shell_error(sh, "Usage: ranging discovery [on|off|status]");
+        return -EINVAL;
+    }
+    if (argc == 2) {
+        if (strcmp(argv[1], "on") == 0) {
+            pdec_discovery_set_enabled(true);
+        } else if (strcmp(argv[1], "off") == 0) {
+            pdec_discovery_set_enabled(false);
+        } else if (strcmp(argv[1], "status") != 0) {
+            shell_error(sh, "Usage: ranging discovery [on|off|status]");
+            return -EINVAL;
+        }
+    }
+    shell_print(sh, "Discovery transmission: %s",
+                pdec_discovery_is_enabled() ? "on" : "off");
+    return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_ranging,
+    SHELL_CMD(discovery, NULL, "Enable/disable discovery transmissions: on|off|status.", cmd_ranging_discovery),
     SHELL_CMD(range, NULL, "Perform ranging with target.", cmd_ranging_range),
     SHELL_CMD(get, NULL, "Get last known distance to a device.", cmd_ranging_get),
     SHELL_CMD(monitor, NULL, "Monitor ranges", cmd_ranging_monitor),
