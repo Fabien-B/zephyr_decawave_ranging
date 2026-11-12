@@ -49,15 +49,15 @@ int pdec_discovery_send_now(void)
     return pdec_radio_submit_discovery();
 }
 
-bool handle_discovery_msg(discovery_msg_t *msg)
+void handle_discovery_msg(discovery_msg_t *msg)
 {
     if (msg->protocol_version != DISCOVERY_PROTOCOL_VERSION) {
-        return true;
+        return;
     }
 
     if (msg->header.src_id != get_my_id()) {
         set_device_tdoa_role(msg->header.src_id, msg->tdoa_role);
     }
 
-    return true;
+    return;
 }

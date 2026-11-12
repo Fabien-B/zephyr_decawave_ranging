@@ -73,7 +73,10 @@ K_THREAD_DEFINE(blinker_tid, BLINKER_STACK_SIZE,
 
 int main(void)
 {
-	pdecInit(NULL);
+	int ret = pdecInit(NULL);
+	if (ret != 0) {
+		return ret;
+	}
 	pdec_uart_protocol_init();
 	// k_msleep(100);
 	

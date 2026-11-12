@@ -104,13 +104,6 @@ union ranging_msg_u
 
 
 typedef enum {
-    IDLE,       // doing nothing
-    POLLING,    // poll (or response) sent, waiting for response (or final)
-    LISTENING,  // waiting to receive a poll
-} status_t;
-
-
-typedef enum {
     DF_SS_RANGING_POLL =  0xE0,
     DF_SS_RANGING_RESP =  0xE1,
     DF_DS_RANGING_POLL =  0xE2,
@@ -125,7 +118,11 @@ typedef enum {
 } frame_role_t;
 
 
+/* Starts the radio owner and waits for hardware initialization. Call once from
+ * thread context. Commands submitted before success return -ENODEV.
+ */
 int pdecInit(uint32_t* dev_id);
+/* Hardware timestamp access is reserved for the radio owner thread. */
 uint64_t get_rx_timestamp_u64(void);
 uint64_t get_tx_timestamp_u64(void);
 uint64_t get_systime_u64(void);
@@ -142,7 +139,6 @@ int pdec_radio_submit_poll(uint16_t dst_id, bool double_sided);
 int pdec_radio_submit_data(uint16_t dst_id, const uint8_t *buffer, uint8_t len);
 int pdec_radio_submit_sync(void);
 int pdec_radio_submit_discovery(void);
-void pdec_radio_restart_rx(void);
 
 // frame control:
 // 2:0    001  data

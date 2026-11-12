@@ -1,4 +1,5 @@
 #include"pdec_common.h"
+#include "pdec_radio.h"
 #include "pdec_database.h"
 #include "pdec_ranging.h"
 #include "uart_binary.h"
@@ -81,12 +82,10 @@ static K_SEM_DEFINE(pending_range_done, 0, 1);
 // delay between frame RX, and the delayed TX
 #define POLL_RX_TO_RESP_TX_DLY_UUS 1500
 
-#define RESP_RX_TIMEOUT_UUS 2000
 
 
 
 extern uint8_t frame_seq_nb;
-extern volatile status_t status;
 
 static union ranging_msg_u tx_msg;
 
@@ -250,10 +249,8 @@ void publish_com_event(uint16_t src_id, const uint8_t *payload, uint8_t len)
 }
 
 void handle_resp_msg(resp_msg_t* msg, bool double_sided) {
-    if( msg->header.dst_id != get_my_id() ||
-        msg->poll_id != tx_msg.poll.poll_id)
+    if (!pdec_radio_matches_response(msg, double_sided))
     {
-        pdec_radio_restart_rx();
         return;
     }
 
@@ -272,7 +269,6 @@ void handle_resp_msg(resp_msg_t* msg, bool double_sided) {
 
         /* Compute response message transmission time. See NOTE 7 below. */
         uint64_t final_tx_time = resp_rx_ts + deltat;
-        dwt_setdelayedtrxtime(final_tx_time>>8);
 
         /* Response TX timestamp is the transmission time we programmed plus the antenna delay. */
         //uint64_t resp_tx_ts = (((uint64_t)(resp_tx_time & 0xFFFFFFFEUL)) << 8) + TX_ANT_DLY;
@@ -290,25 +286,12 @@ void handle_resp_msg(resp_msg_t* msg, bool double_sided) {
         tx_msg.final.resp_rx_ts = (uint32_t)resp_rx_ts;
         tx_msg.final.final_tx_ts = (uint32_t)final_tx_ts;
 
-        /* Write and send the response message. See NOTE 9 below. */
-        dwt_writetxdata(sizeof(tx_msg.final), (uint8_t*)&tx_msg.final, 0); /* Zero offset in TX buffer. */
-        dwt_writetxfctrl(sizeof(tx_msg.final), 0, 1);          /* Zero offset in TX buffer, ranging. */
-
-        dwt_writesysstatuslo(SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR);
-        dwt_setrxtimeout(0);
-
-        int ret = dwt_starttx(DWT_START_TX_DELAYED | DWT_RESPONSE_EXPECTED);
-
-        /* If dwt_starttx() returns an error, abandon this ranging exchange and proceed to the next one. See NOTE 10 below. */
-        if (ret == DWT_SUCCESS)
-        {
-            // /* Increment frame sequence number after transmission of the poll message (modulo 256). */
+        if (pdec_radio_transmit(&tx_msg.final, sizeof(tx_msg.final), true,
+                                true, final_tx_time) == 0) {
             frame_seq_nb++;
-        } else {
-            pdec_radio_restart_rx();
         }
     } else {
-        pdec_radio_restart_rx();
+        pdec_radio_complete_exchange();
     }
 
     set_distance(get_my_id(), msg->header.src_id, distance);
@@ -321,8 +304,8 @@ void handle_resp_msg(resp_msg_t* msg, bool double_sided) {
 }
 
 void handle_poll_msg(poll_msg_t* msg, bool double_sided) {
-    if( msg->header.dst_id != get_my_id() && msg->header.dst_id != BROADCAST_ID) {
-        pdec_radio_restart_rx();
+    if (!pdec_radio_can_respond() ||
+        (msg->header.dst_id != get_my_id() && msg->header.dst_id != BROADCAST_ID)) {
         return;
     }
 
@@ -348,42 +331,26 @@ void handle_poll_msg(poll_msg_t* msg, bool double_sided) {
 
     /* Compute response message transmission time. See NOTE 7 below. */
     uint64_t resp_tx_time = poll_rx_ts + deltat;
-    dwt_setdelayedtrxtime(resp_tx_time>>8);
 
     uint64_t resp_tx_ts = (resp_tx_time & 0xFFFFFFFE00) + TX_ANT_DLY;
 
     tx_msg.resp.poll_rx_ts = (uint32_t)poll_rx_ts;
     tx_msg.resp.resp_tx_ts = (uint32_t)resp_tx_ts;
 
-    dwt_writetxdata(sizeof(tx_msg.resp), (uint8_t*)&tx_msg.resp, 0); /* Zero offset in TX buffer. */
-    dwt_writetxfctrl(sizeof(tx_msg.resp), 0, 1);          /* Zero offset in TX buffer, ranging. */
-
-    dwt_writesysstatuslo(SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR);
-    
-    int ret;
-
-    dwt_setrxaftertxdelay(0);
-    if(double_sided) {
-        dwt_setrxtimeout(RESP_RX_TIMEOUT_UUS);
-    } else {
-        dwt_setrxtimeout(0);
-    }
-    ret = dwt_starttx(DWT_START_TX_DELAYED | DWT_RESPONSE_EXPECTED);
-    
-    /* If dwt_starttx() returns an error, abandon this ranging exchange and proceed to the next one. See NOTE 10 below. */
-    if (ret == DWT_SUCCESS)
-    {
-        // /* Increment frame sequence number after transmission of the poll message (modulo 256). */
+    if (pdec_radio_transmit(&tx_msg.resp, sizeof(tx_msg.resp), true,
+                            true, resp_tx_time) == 0) {
         frame_seq_nb++;
-    } else {
-        pdec_radio_restart_rx();
     }
-    
 }
+
 
 void handle_final_msg(final_msg_t* msg) {
 
-    if(msg->header.dst_id == get_my_id() && msg->resp_id == tx_msg.resp.resp_id) {
+    if (msg->header.dst_id == get_my_id() && !pdec_radio_matches_final(msg)) {
+        return;
+    }
+    if (pdec_radio_matches_final(msg)) {
+        pdec_radio_complete_exchange();
         // final message from a DS ranging directed to us.
         /* Retrieve poll transmission and response reception timestamps. See NOTE 9 below. */
         uint64_t resp_tx_ts = get_tx_timestamp_u64(); //should be the same as msg->resp_tx_ts, maybe more precise.
@@ -420,7 +387,6 @@ void handle_final_msg(final_msg_t* msg) {
 #endif
     }
 
-    pdec_radio_restart_rx();
 }
 
 int request_range(uint16_t dst_id, bool double_sided, double *distance, k_timeout_t timeout)
@@ -468,6 +434,7 @@ int send_poll(uint16_t dst_id, bool double_sided)
 }
 
 void send_poll_now(uint16_t dst_id, bool double_sided) {
+    pdec_radio_assert_owner();
     tx_msg.header.frame_control = FRAME_CONTROL;
     tx_msg.header.pan_id = MY_PAN_ID;
     tx_msg.header.dst_id = dst_id;
@@ -481,25 +448,9 @@ void send_poll_now(uint16_t dst_id, bool double_sided) {
     }
     tx_msg.poll.poll_id =  sys_rand8_get();
 
-    dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
-    dwt_writetxdata(sizeof(tx_msg.poll), (uint8_t*)&tx_msg.poll, 0); /* Zero offset in TX buffer. */
-    dwt_writetxfctrl(sizeof(tx_msg.poll), 0, 1);          /* Zero offset in TX buffer, ranging. */
-    
-    // interrompt le RX permanent
-    dwt_forcetrxoff();
-    dwt_writesysstatuslo(DWT_INT_RX | DWT_INT_TXFRS_BIT_MASK);
-
-
-    dwt_setrxaftertxdelay(0);
-    dwt_setrxtimeout(RESP_RX_TIMEOUT_UUS);
-    int ret = dwt_starttx(DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED);
-    if (ret != DWT_SUCCESS) {
-        pdec_radio_restart_rx();
-        return;
+    if (pdec_radio_transmit(&tx_msg.poll, sizeof(tx_msg.poll), true, false, 0) == 0) {
+        frame_seq_nb++;
     }
-
-    /* Increment frame sequence number after transmission of the poll message (modulo 256). */
-    frame_seq_nb++;
 }
 
 

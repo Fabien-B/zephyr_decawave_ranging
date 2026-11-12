@@ -3,6 +3,7 @@
 #include "pdec_discovery.h"
 #include "pdec_ranging.h"
 #include "pdec_tdoa.h"
+#include "pdec_radio.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -18,51 +19,13 @@
 
 #include "app_print.h"
 
-#define RADIO_STACK_SIZE 2048
-#define RADIO_PRIORITY -2
-#define RADIO_QUEUE_LEN 16
-
-enum radio_event_kind {
-    RADIO_EVENT_TX_DONE,
-    RADIO_EVENT_RX_OK,
-    RADIO_EVENT_RX_TIMEOUT,
-    RADIO_EVENT_RX_ERROR,
-    RADIO_EVENT_SEND_POLL,
-    RADIO_EVENT_SEND_DATA,
-    RADIO_EVENT_SEND_SYNC,
-    RADIO_EVENT_SEND_DISCOVERY,
-};
-
-struct radio_event {
-    enum radio_event_kind kind;
-    union {
-        struct {
-            uint16_t dst_id;
-            bool double_sided;
-        } poll;
-        struct {
-            uint16_t dst_id;
-            uint8_t len;
-            uint8_t payload[PAYLOAD_FRAME_LEN_MAX];
-        } data;
-    };
-};
-
-K_MSGQ_DEFINE(radio_queue, sizeof(struct radio_event), RADIO_QUEUE_LEN, 4);
-K_THREAD_STACK_DEFINE(radio_stack, RADIO_STACK_SIZE);
-static struct k_thread radio_thread_data;
-static bool radio_thread_started;
-
 static void cbTxDone(const dwt_cb_data_t *cb_data);
 static void cbRxOk(const dwt_cb_data_t *cb_data);
 static void cbRxTo(const dwt_cb_data_t *cb_data);
 static void cbRxErr(const dwt_cb_data_t *cb_data);
-static bool handle_com_msg(const com_msg_t *msg, uint16_t rx_frame_len);
+static void handle_com_msg(const com_msg_t *msg, uint16_t rx_frame_len);
 static void process_rx_ok(void);
-static void send_data_msg_now(uint16_t dst_id, uint8_t* buffer, uint8_t len);
-void send_poll_now(uint16_t dst_id, bool double_sided);
-void send_sync_now(void);
-void send_discovery_now(void);
+
 
 
 dwt_config_t config = {
@@ -110,131 +73,52 @@ dwt_callbacks_s dw_callbacks = {
 
 /* Frame sequence number, incremented after each transmission. */
 uint8_t frame_seq_nb = 0;
-volatile status_t status = IDLE;
 
 static union ranging_msg_u rx_msg;
 
 
 extern const struct gpio_dt_spec led;
 
-static int submit_radio_event(const struct radio_event *event)
+/* Called synchronously by dwt_isr(), exclusively in the radio thread. */
+static void cbRxTo(const dwt_cb_data_t *cb_data)
 {
-    return k_msgq_put(&radio_queue, event, K_NO_WAIT);
+    ARG_UNUSED(cb_data);
+    pdec_radio_rx_error();
 }
 
-static void radio_thread(void *p1, void *p2, void *p3)
+static void cbRxErr(const dwt_cb_data_t *cb_data)
 {
-    ARG_UNUSED(p1);
-    ARG_UNUSED(p2);
-    ARG_UNUSED(p3);
-
-    struct radio_event event;
-
-    while (true) {
-        if (k_msgq_get(&radio_queue, &event, K_FOREVER) != 0) {
-            continue;
-        }
-
-        switch (event.kind) {
-        case RADIO_EVENT_TX_DONE:
-            dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
-            break;
-        case RADIO_EVENT_RX_OK:
-            process_rx_ok();
-            break;
-        case RADIO_EVENT_RX_TIMEOUT:
-            dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
-            pdec_radio_restart_rx();
-            break;
-        case RADIO_EVENT_RX_ERROR:
-            pdec_radio_restart_rx();
-            break;
-        case RADIO_EVENT_SEND_POLL:
-            send_poll_now(event.poll.dst_id, event.poll.double_sided);
-            break;
-        case RADIO_EVENT_SEND_DATA:
-            send_data_msg_now(event.data.dst_id, event.data.payload, event.data.len);
-            break;
-        case RADIO_EVENT_SEND_SYNC:
-            send_sync_now();
-            break;
-        case RADIO_EVENT_SEND_DISCOVERY:
-            send_discovery_now();
-            break;
-        }
-    }
+    ARG_UNUSED(cb_data);
+    pdec_radio_rx_error();
 }
 
-static void start_radio_thread(void)
+static void cbTxDone(const dwt_cb_data_t *cb_data)
 {
-    if (radio_thread_started) {
+    ARG_UNUSED(cb_data);
+    pdec_radio_tx_done();
+}
+
+static void handle_com_msg(const com_msg_t *msg, uint16_t rx_frame_len)
+{
+    if (rx_frame_len < COM_MSG_SIZE(0)) {
         return;
     }
-
-    k_thread_create(&radio_thread_data, radio_stack, K_THREAD_STACK_SIZEOF(radio_stack),
-                    radio_thread, NULL, NULL, NULL, RADIO_PRIORITY, 0, K_NO_WAIT);
-    radio_thread_started = true;
-}
-
-static void cbRxTo(const dwt_cb_data_t *cb_data) {
-    ARG_UNUSED(cb_data);
-
-    struct radio_event event = {
-        .kind = RADIO_EVENT_RX_TIMEOUT,
-    };
-
-    (void)submit_radio_event(&event);
-}
-
-static void cbRxErr(const dwt_cb_data_t *cb_data) {
-    ARG_UNUSED(cb_data);
-
-    struct radio_event event = {
-        .kind = RADIO_EVENT_RX_ERROR,
-    };
-
-    (void)submit_radio_event(&event);
-}
-
-static void cbTxDone(const dwt_cb_data_t *cb_data) {
-    ARG_UNUSED(cb_data);
-
-    struct radio_event event = {
-        .kind = RADIO_EVENT_TX_DONE,
-    };
-
-    (void)submit_radio_event(&event);
-}
-
-static bool handle_com_msg(const com_msg_t *msg, uint16_t rx_frame_len)
-{
     uint8_t len = msg->len;
-
     if (len > PAYLOAD_FRAME_LEN_MAX || rx_frame_len < COM_MSG_SIZE(len)) {
-        return true;
+        return;
     }
-
     publish_com_event(msg->header.src_id, msg->payload, len);
-    return true;
 }
-
-
-
-
-
 
 static void process_rx_ok(void)
 {
     uint8_t rng;
-    bool restart_rx = false;
     
-    dwt_writesysstatuslo(DWT_INT_RXFCG_BIT_MASK);
     uint16_t frame_len = dwt_getframelength(&rng);
 
     // to check if the range bit is set: rng & DWT_CB_DATA_RX_FLAG_RNG
 
-    if (frame_len > sizeof(rx_msg)) {
-        pdec_radio_restart_rx();
+    if (frame_len < sizeof(frame_header_t) + 2 || frame_len > sizeof(rx_msg)) {
         return;
     }
 
@@ -243,7 +127,6 @@ static void process_rx_ok(void)
 
     // check the type of the frame and the PAN ID.
     if(header->frame_control != FRAME_CONTROL || header->pan_id != MY_PAN_ID) {
-        pdec_radio_restart_rx();
         return;
     }
 
@@ -257,100 +140,86 @@ static void process_rx_ok(void)
     {
     case DF_SS_RANGING_POLL:
         if (frame_len < sizeof(poll_msg_t)) {
-            restart_rx = true;
             break;
         }
         handle_poll_msg((poll_msg_t*)header, false);
         break;
     case DF_DS_RANGING_POLL:
         if (frame_len < sizeof(poll_msg_t)) {
-            restart_rx = true;
             break;
         }
         handle_poll_msg((poll_msg_t*)header, true);
         break;
     case DF_SS_RANGING_RESP:
         if (frame_len < sizeof(resp_msg_t)) {
-            restart_rx = true;
             break;
         }
         handle_resp_msg((resp_msg_t*)header, false);
         break;
     case DF_DS_RANGING_RESP:
         if (frame_len < sizeof(resp_msg_t)) {
-            restart_rx = true;
             break;
         }
         handle_resp_msg((resp_msg_t*)header, true);
         break;
     case DF_DS_RANGING_FINAL:
         if (frame_len < sizeof(final_msg_t)) {
-            restart_rx = true;
             break;
         }
         handle_final_msg((final_msg_t*)header);
         break;
     case DF_TDOA_SYNC:
         if (frame_len < sizeof(sync_msg_t)) {
-            restart_rx = true;
             break;
         }
-        restart_rx = handle_sync_msg((sync_msg_t*)header);
+        handle_sync_msg((sync_msg_t*)header);
         break;
     case DF_TDOA_BLINK:
         if (frame_len < sizeof(blink_msg_t)) {
-            restart_rx = true;
             break;
         }
-        restart_rx = handle_blink_msg((blink_msg_t*)header);
+        handle_blink_msg((blink_msg_t*)header);
         break;
     case DF_TDOA_BLINK_REPORT:
         if (frame_len < sizeof(blink_report_msg_t)) {
-            restart_rx = true;
             break;
         }
-        restart_rx = handle_blink_report_msg((blink_report_msg_t*)header);
+        handle_blink_report_msg((blink_report_msg_t*)header);
         //printf("BLINK REPORT\n");
         break;
     case DF_COM_MSG:
-        restart_rx = handle_com_msg(&rx_msg.com, frame_len);
+        handle_com_msg(&rx_msg.com, frame_len);
         break;
     case DF_DISCOVERY_HELLO:
         if (frame_len < sizeof(discovery_msg_t)) {
-            restart_rx = true;
             break;
         }
-        restart_rx = handle_discovery_msg(&rx_msg.discovery);
+        handle_discovery_msg(&rx_msg.discovery);
         break;
     default:
-        restart_rx = true;
         break;
     }
 
-    if (restart_rx) {
-        pdec_radio_restart_rx();
-    }
 }
 
 static void cbRxOk(const dwt_cb_data_t *cb_data)
 {
     ARG_UNUSED(cb_data);
 
-    struct radio_event event = {
-        .kind = RADIO_EVENT_RX_OK,
-    };
-
-    (void)submit_radio_event(&event);
+    if (pdec_radio_rx_begin()) {
+        process_rx_ok();
+        pdec_radio_rx_end();
+    }
 }
 
 void send_data_msg(uint16_t dst_id, uint8_t* buffer, uint8_t len) {
     (void)pdec_radio_submit_data(dst_id, buffer, len);
 }
 
-static void send_data_msg_now(uint16_t dst_id, uint8_t* buffer, uint8_t len) {
+void pdec_radio_send_data_now(uint16_t dst_id, uint8_t* buffer, uint8_t len) {
+    pdec_radio_assert_owner();
     com_msg_t msg;
     if(len > PAYLOAD_FRAME_LEN_MAX) {
-        pdec_radio_restart_rx();
         return;
     }
 
@@ -363,26 +232,14 @@ static void send_data_msg_now(uint16_t dst_id, uint8_t* buffer, uint8_t len) {
     msg.len = len;
     memcpy(msg.payload, buffer, len);
 
-    dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
-    dwt_writetxdata(COM_MSG_SIZE(len), (uint8_t*)&msg, 0); /* Zero offset in TX buffer. */
-    dwt_writetxfctrl(COM_MSG_SIZE(len), 0, 0);          /* Zero offset in TX buffer, no ranging. */
-    
-    // interrompt le RX permanent
-    dwt_forcetrxoff();
-    dwt_writesysstatuslo(DWT_INT_RX | DWT_INT_TXFRS_BIT_MASK);
-
-    dwt_setrxaftertxdelay(0);
-    int ret = dwt_starttx(DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED);
-    if (ret != DWT_SUCCESS) {
-        pdec_radio_restart_rx();
-        return;
+    if (pdec_radio_transmit(&msg, COM_MSG_SIZE(len), false, false, 0) == 0) {
+        frame_seq_nb++;
     }
-
-    frame_seq_nb++;
 }
 
 void send_discovery_now(void)
 {
+    pdec_radio_assert_owner();
     discovery_msg_t msg;
 
     msg.header.frame_control = FRAME_CONTROL;
@@ -394,96 +251,36 @@ void send_discovery_now(void)
     msg.protocol_version = 1;
     msg.tdoa_role = (uint8_t)pdecTdoaGetRole();
 
-    dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
-    dwt_writetxdata(sizeof(msg), (uint8_t *)&msg, 0);
-    dwt_writetxfctrl(sizeof(msg), 0, 0);
-
-    dwt_forcetrxoff();
-    dwt_writesysstatuslo(DWT_INT_RX | DWT_INT_TXFRS_BIT_MASK);
-
-    dwt_setrxaftertxdelay(0);
-    dwt_setrxtimeout(0);
-    int ret = dwt_starttx(DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED);
-    if (ret != DWT_SUCCESS) {
-        pdec_radio_restart_rx();
-        return;
+    if (pdec_radio_transmit(&msg, sizeof(msg), false, false, 0) == 0) {
+        frame_seq_nb++;
     }
-
-    frame_seq_nb++;
 }
 
-void pdec_radio_restart_rx(void)
+
+int pdec_radio_hw_init(uint32_t *dev_id)
 {
-    dwt_setrxtimeout(0);
-    dwt_rxenable(DWT_START_RX_IMMEDIATE);
-}
-
-int pdec_radio_submit_poll(uint16_t dst_id, bool double_sided)
-{
-    struct radio_event event = {
-        .kind = RADIO_EVENT_SEND_POLL,
-        .poll = {
-            .dst_id = dst_id,
-            .double_sided = double_sided,
-        },
-    };
-
-    return submit_radio_event(&event);
-}
-
-int pdec_radio_submit_data(uint16_t dst_id, const uint8_t *buffer, uint8_t len)
-{
-    struct radio_event event = {
-        .kind = RADIO_EVENT_SEND_DATA,
-        .data = {
-            .dst_id = dst_id,
-            .len = len,
-        },
-    };
-
-    if (len > PAYLOAD_FRAME_LEN_MAX) {
-        return -EMSGSIZE;
-    }
-
-    memcpy(event.data.payload, buffer, len);
-    return submit_radio_event(&event);
-}
-
-int pdec_radio_submit_sync(void)
-{
-    struct radio_event event = {
-        .kind = RADIO_EVENT_SEND_SYNC,
-    };
-
-    return submit_radio_event(&event);
-}
-
-int pdec_radio_submit_discovery(void)
-{
-    struct radio_event event = {
-        .kind = RADIO_EVENT_SEND_DISCOVERY,
-    };
-
-    return submit_radio_event(&event);
-}
-
-int pdecInit(uint32_t* dev_id) {
+    pdec_radio_assert_owner();
 
     ranging_init();
     tdoa_init();
 
     // init DW driver
-    dw3000_hw_init();
+    int ret = dw3000_hw_init();
+    if (ret != 0) {
+        return ret;
+    }
     dw3000_hw_reset();
-    dwt_probe((struct dwt_probe_s *)&dw3000_probe_interf);
-    dw3000_hw_init_interrupt();
+    ret = dwt_probe((struct dwt_probe_s *)&dw3000_probe_interf);
+    if (ret != DWT_SUCCESS) {
+        return ret;
+    }
     dwt_setcallbacks(&dw_callbacks);
 
     k_sleep(K_MSEC(500));
 
 
     uint32_t id = dwt_readdevid();
-	int ret = dwt_check_dev_id();
+    ret = dwt_check_dev_id();
     if(ret != DWT_SUCCESS) {
         ARG_UNUSED(id);
         return ret;
@@ -494,9 +291,13 @@ int pdecInit(uint32_t* dev_id) {
     }
 
     // Wait for DW IC to be in IDLE_RC
-    while (!dwt_checkidlerc())  {
-       k_sleep(K_MSEC(100));
-    };
+    int64_t idle_deadline = k_uptime_get() + 1000;
+    while (!dwt_checkidlerc()) {
+        if (k_uptime_get() >= idle_deadline) {
+            return -ETIMEDOUT;
+        }
+        k_msleep(100);
+    }
 
     ret = dwt_initialise(DWT_DW_INIT);
     if (ret != DWT_SUCCESS) {
@@ -535,10 +336,11 @@ int pdecInit(uint32_t* dev_id) {
     // Enabling LEDs so that for each TX the D1 LED will flash on DW3000 red eval-shield boards.
     dwt_setleds(DWT_LEDS_ENABLE | DWT_LEDS_INIT_BLINK);
 
-    start_radio_thread();
+    ret = dw3000_hw_init_interrupt();
+    if (ret != 0) {
+        return ret;
+    }
 
-    dwt_setrxtimeout(0);
-    dwt_rxenable(DWT_START_RX_IMMEDIATE);
 
 
     return ret;
@@ -546,6 +348,7 @@ int pdecInit(uint32_t* dev_id) {
 
 uint64_t get_rx_timestamp_u64(void)
 {
+    pdec_radio_assert_owner();
     uint64_t ts = 0;
     dwt_readrxtimestamp((uint8_t*)&ts, DWT_STS0_M);
     return ts;
@@ -553,6 +356,7 @@ uint64_t get_rx_timestamp_u64(void)
 
 uint64_t get_tx_timestamp_u64(void)
 {
+    pdec_radio_assert_owner();
     uint64_t ts = 0;
     // it works because of little-endian
     dwt_readtxtimestamp(((uint8_t*)&ts));
@@ -561,6 +365,7 @@ uint64_t get_tx_timestamp_u64(void)
 
 uint64_t get_systime_u64(void)
 {
+    pdec_radio_assert_owner();
     uint64_t ts = 0;
     // it works because of little-endian
     dwt_readsystime(((uint8_t*)&ts));

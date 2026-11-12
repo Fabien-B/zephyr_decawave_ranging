@@ -1,4 +1,5 @@
 #include"pdec_common.h"
+#include "pdec_radio.h"
 #include "pdec_database.h"
 #include "pdec_tdoa.h"
 #include "pdec_ranging.h"
@@ -45,7 +46,6 @@ static bool sync_thread_active;
 uint64_t _master_blink_rx_ts = 0;
 
 extern uint8_t frame_seq_nb;
-extern volatile status_t status;
 
 static union ranging_msg_u tx_msg;
 
@@ -359,6 +359,7 @@ void send_sync() {
 }
 
 void send_sync_now() {
+    pdec_radio_assert_owner();
     tx_msg.header.frame_control = FRAME_CONTROL;
     tx_msg.header.seq_number = frame_seq_nb;
     tx_msg.header.pan_id = MY_PAN_ID;
@@ -373,46 +374,21 @@ void send_sync_now() {
 
     /* Compute response message transmission time. See NOTE 7 below. */
     uint64_t sync_tx_time = systime + deltat;
-    dwt_setdelayedtrxtime(sync_tx_time>>8);
 
     tx_msg.sync.sync_ts = (sync_tx_time & 0xFFFFFFFE00) + TX_ANT_DLY;
 
 
-    dwt_writetxdata(sizeof(tx_msg.sync), (uint8_t*)&tx_msg.sync, 0); /* Zero offset in TX buffer. */
-    dwt_writetxfctrl(sizeof(tx_msg.sync), 0, 1);          /* Zero offset in TX buffer, ranging. */
-
-    
-    // int ret;
-    // dwt_forcetrxoff();
-    // dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
-    // dwt_setrxtimeout(0);
-    // ret = dwt_starttx(DWT_START_TX_DELAYED);
-    // // ret = dwt_starttx(DWT_START_TX_IMMEDIATE);
-
-    int ret;
-    dwt_forcetrxoff();
-    dwt_setrxaftertxdelay(0);
-    dwt_setrxtimeout(0);
-    status = POLLING;
-    ret = dwt_starttx(DWT_START_TX_DELAYED | DWT_RESPONSE_EXPECTED);
-
-    if (ret == DWT_SUCCESS)
-    {
-        // Increment frame sequence number after transmission of the poll message (modulo 256).
+    if (pdec_radio_transmit(&tx_msg.sync, sizeof(tx_msg.sync), true,
+                            true, sync_tx_time) == 0) {
         frame_seq_nb++;
-    } else {
-        pdec_radio_restart_rx();
     }
-
 }
 
-
-
-bool handle_sync_msg(sync_msg_t* msg) {
+void handle_sync_msg(sync_msg_t* msg) {
     tdoa_role_t role = pdecTdoaGetRole();
 
     if(role == TDOA_ROLE_NONE) {
-        return true;
+        return;
     }
 
     uint64_t sync_rx_ts = get_rx_timestamp_u64();
@@ -436,8 +412,7 @@ bool handle_sync_msg(sync_msg_t* msg) {
     
     if(role != TDOA_ROLE_BLINKER) {
         // beacons just wait for a BLINK or an other SYNC
-        status = POLLING;
-        return true;
+        return;
     } else {
         // BLINKER will send a BLINK soon (first time slot after SYNC)
 
@@ -453,39 +428,24 @@ bool handle_sync_msg(sync_msg_t* msg) {
 
         /* Compute response message transmission time. See NOTE 7 below. */
         uint64_t blink_tx_time = sync_rx_ts + deltat;
-        dwt_setdelayedtrxtime(blink_tx_time>>8);
 
         tx_msg.blink.blink_id = blink_seq_nb;
 
-        dwt_writetxdata(sizeof(tx_msg.blink), (uint8_t*)&tx_msg.blink, 0); /* Zero offset in TX buffer. */
-        dwt_writetxfctrl(sizeof(tx_msg.blink), 0, 1);          /* Zero offset in TX buffer, ranging. */
-
-        dwt_setrxaftertxdelay(0);
-        dwt_setrxtimeout(0);
-        status = POLLING;
-        int ret = dwt_starttx(DWT_START_TX_DELAYED | DWT_RESPONSE_EXPECTED);
-
-        if (ret == DWT_SUCCESS)
-        {
-            // Increment frame sequence number after transmission of the poll message (modulo 256).
+        if (pdec_radio_transmit(&tx_msg.blink, sizeof(tx_msg.blink), true,
+                                true, blink_tx_time) == 0) {
             frame_seq_nb++;
             start_blink_report_collection(tx_msg.blink.blink_id, get_my_id());
             blink_seq_nb++;
-            return false;
-        } else {
-            return true;
         }
     }
-
-
 }
 
 
-bool handle_blink_msg(blink_msg_t* msg) {
+void handle_blink_msg(blink_msg_t* msg) {
     tdoa_role_t role = pdecTdoaGetRole();
 
     if(role == TDOA_ROLE_NONE) {
-        return true;
+        return;
     }
 
     last_blink_id = msg->blink_id;
@@ -520,47 +480,30 @@ bool handle_blink_msg(blink_msg_t* msg) {
     tx_msg.blink_report.blink_snd_id = msg->header.src_id;
     tx_msg.blink_report.blink_rx_ts = blink_ts_master;
 
-    // dwt_setrxtimeout(0);
-    // dwt_rxenable(DWT_START_RX_IMMEDIATE);
-
-    dwt_writetxdata(sizeof(tx_msg.blink_report), (uint8_t*)&tx_msg.blink_report, 0); /* Zero offset in TX buffer. */
-    dwt_writetxfctrl(sizeof(tx_msg.blink_report), 0, 1);          /* Zero offset in TX buffer, ranging. */
-
-
-    // en dtu (499.2MHz*128)
-    uint32_t deltat = (SYNC_SLOT_TIME * UUS_TO_DWT_TIME) * (get_tdoa_index(get_my_id()) + 1);
+    uint8_t index = get_tdoa_index(get_my_id());
+    if (index == 255) {
+        return;
+    }
+    uint64_t deltat = (uint64_t)SYNC_SLOT_TIME * UUS_TO_DWT_TIME * (index + 1);
     uint64_t blink_report_tx_time = blink_rx_ts + deltat;
-    dwt_setdelayedtrxtime(blink_report_tx_time>>8);
-    
-
-    dwt_setrxaftertxdelay(0);
-    dwt_setrxtimeout(0);
-    status = POLLING;
-    int ret = dwt_starttx(DWT_START_TX_DELAYED | DWT_RESPONSE_EXPECTED);
-
-    if (ret == DWT_SUCCESS)
-    {
-        // Increment frame sequence number after transmission of the poll message (modulo 256).
+    if (pdec_radio_transmit(&tx_msg.blink_report, sizeof(tx_msg.blink_report), true,
+                            true, blink_report_tx_time) == 0) {
         frame_seq_nb++;
-        return false;
-    } else {
-        return true;
     }
 }
 
-bool handle_blink_report_msg(blink_report_msg_t* msg) {
+
+void handle_blink_report_msg(blink_report_msg_t* msg) {
     tdoa_role_t role = pdecTdoaGetRole();
 
     if(!tdoa_role_reports_blinks(role)) {
-        return true;
+        return;
     }
 
     collect_blink_report(msg->blink_id, msg->blink_snd_id, msg->header.src_id,
                          msg->blink_rx_ts);
 
-    status = POLLING;
-    // dwt_setrxaftertxdelay(0);
-    return true;
+    return;
 }
 
 static void pdec_sync_task(void *, void *, void *) {

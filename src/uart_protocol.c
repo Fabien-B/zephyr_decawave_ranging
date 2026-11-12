@@ -17,6 +17,8 @@
 #define UART_DEVICE_NODE DT_CHOSEN(zephyr_console)
 #define USB_DEVICE_NODE DT_NODELABEL(pdec_usb_uart)
 #define USB_TX_RING_SIZE 2048
+#define UART_WORK_STACK_SIZE 2048
+#define UART_WORK_PRIORITY 5
 
 #define UART_PROTOCOL_SYNC_BYTE 0xFF
 #define UART_PROTOCOL_MODE_SWITCH_MS 1000
@@ -59,6 +61,11 @@ struct uart_protocol_ctx {
 static struct uart_protocol_ctx protocols[PDEC_SERIAL_PORT_COUNT];
 
 static K_MUTEX_DEFINE(uart_tx_lock);
+/* Parsing can emit polled UART replies. Keep it preemptible and off the
+ * cooperative system workqueue, so it cannot hold up the radio owner.
+ */
+K_THREAD_STACK_DEFINE(uart_work_stack, UART_WORK_STACK_SIZE);
+static struct k_work_q uart_work_queue;
 
 static int uart_protocol_write_unlocked(struct uart_protocol_ctx *ctx,
                                        const uint8_t *data, size_t len)
@@ -280,11 +287,13 @@ static void uart_protocol_isr(const struct device *dev, void *user_data)
         }
     }
 
-    k_work_submit(&ctx->rx_work);
+    k_work_submit_to_queue(&uart_work_queue, &ctx->rx_work);
 }
 
 int pdec_uart_protocol_init(void)
 {
+    k_work_queue_start(&uart_work_queue, uart_work_stack,
+                       K_THREAD_STACK_SIZEOF(uart_work_stack), UART_WORK_PRIORITY, NULL);
     const struct device *devices[PDEC_SERIAL_PORT_COUNT] = {
         DEVICE_DT_GET(UART_DEVICE_NODE),
         DEVICE_DT_GET(USB_DEVICE_NODE),
