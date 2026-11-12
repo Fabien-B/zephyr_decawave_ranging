@@ -1,3 +1,14 @@
 config PDEC_PRINT_RANGING
     bool "Print ranging results"
     default y
+
+config PDEC_SPI_POLLING
+    bool
+    default y
+    depends on SOC_NRF52833 && DT_HAS_PDEC_NRF52833_SPIM3_ENABLED
+    select PINCTRL
+    # Nordic pinctrl compiles SPIM pin functions only with native SPIM DT nodes
+    # or NRFX_SPIM enabled. Our private compatible deliberately has no native
+    # SPIM controller. Enable the HAL instance so pinctrl can route its pins;
+    # this does not instantiate Zephyr's IRQ-driven SPI controller.
+    select NRFX_SPIM3

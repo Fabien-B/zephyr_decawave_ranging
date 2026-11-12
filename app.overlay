@@ -1,5 +1,6 @@
 
 &spi3 {
+    compatible = "pdec,nrf52833-spim3";
     status = "okay";
     dwm3001c@0 {
         compatible = "decawave,dw3000";

@@ -1,0 +1,4 @@
+/* Optional comparison backend: restore Zephyr's interrupt-driven SPIM driver. */
+&spi3 {
+    compatible = "nordic,nrf-spim";
+};

@@ -1,0 +1,24 @@
+description: Radio-owned nRF52833 SPIM3 with polling EasyDMA completion
+compatible: "pdec,nrf52833-spim3"
+include: [spi-controller.yaml, pinctrl-device.yaml]
+properties:
+  reg:
+    required: true
+  pinctrl-0:
+    required: true
+  pinctrl-names:
+    required: true
+  max-frequency:
+    type: int
+    default: 32000000
+  easydma-maxcnt-bits:
+    type: int
+    default: 16
+  overrun-character:
+    type: int
+    default: 255
+  rx-delay-supported:
+    type: boolean
+  rx-delay:
+    type: int
+    default: 2

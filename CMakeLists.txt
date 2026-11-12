@@ -4,6 +4,8 @@ cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(test_dwm3001c)
 
+target_sources_ifdef(CONFIG_PDEC_SPI_POLLING app PRIVATE src/pdec_spi_polling.c)
+
 # Replace the hardware/IRQ and SPI platform ports; keep the vendor device driver.
 # The radio thread owns ISR dispatch and the contiguous SPI DMA buffers.
 set(dw3000_module_dir "${ZEPHYR_ZEPHYR_DW3000_DECADRIVER_MODULE_DIR}")
