@@ -35,6 +35,7 @@ class Command(IntEnum):
     GET_DISTANCE = 0x02
     LIST_DEVICES = 0x03
     SEND_DATA = 0x04
+    SET_DISCOVERY = 0x05
 
 
 class Message(IntEnum):
@@ -43,6 +44,7 @@ class Message(IntEnum):
     DISTANCE = 0x82
     DEVICE_LIST = 0x83
     SEND_DATA_RESULT = 0x84
+    DISCOVERY_STATE = 0x85
     RANGING_EVENT = 0x90
     DATA_EVENT = 0x91
     TDOA_REPORT_EVENT = 0x92
@@ -286,6 +288,20 @@ class PdecUart:
             raise PdecProtocolError(Command.SEND_DATA, result.status)
         return result
 
+    def set_discovery(self, enabled: bool, timeout: Optional[float] = None) -> bool:
+        """Enable/disable outgoing discovery on the connected module until reboot."""
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a bool")
+        self._send_frame(bytes([Command.SET_DISCOVERY, int(enabled)]))
+        payload = self._wait_for(Message.DISCOVERY_STATE, timeout)
+        if len(payload) != 3 or payload[0] != Message.DISCOVERY_STATE:
+            raise PdecUartError("invalid discovery-state response")
+        if payload[1] != Status.OK:
+            raise PdecProtocolError(Command.SET_DISCOVERY, payload[1])
+        if payload[2] not in (0, 1):
+            raise PdecUartError("invalid discovery enabled value")
+        return bool(payload[2])
+
     def command(self, line: str) -> object:
         parts = line.strip().split()
         if not parts:
@@ -315,10 +331,13 @@ class PdecUart:
         if cmd == "list" and len(parts) == 1:
             return self.list_devices()
 
+        if cmd == "discovery" and len(parts) == 2 and parts[1].lower() in {"on", "off"}:
+            return self.set_discovery(parts[1].lower() == "on")
+
         if cmd == "send" and len(parts) >= 3:
             return self.send_data(_parse_id(parts[1]), " ".join(parts[2:]))
 
-        raise ValueError("commands: monitor [off], tdoa monitor [off], range <id>, get <id>, list, send <id> <message>")
+        raise ValueError("commands: monitor [off], tdoa monitor [off], range <id>, get <id>, list, discovery on|off, send <id> <message>")
 
     def _send_frame(self, payload: bytes) -> None:
         if len(payload) > self.MAX_PAYLOAD_LEN:

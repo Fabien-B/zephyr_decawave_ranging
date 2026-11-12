@@ -8,6 +8,7 @@
 
 #include "pdec_common.h"
 #include "pdec_database.h"
+#include "pdec_discovery.h"
 #include "pdec_ranging.h"
 #include "uart_protocol.h"
 
@@ -18,6 +19,7 @@ enum pdec_binary_cmd {
     PDEC_BINARY_CMD_GET_DISTANCE = 0x02,
     PDEC_BINARY_CMD_LIST_DEVICES = 0x03,
     PDEC_BINARY_CMD_SEND_DATA = 0x04,
+    PDEC_BINARY_CMD_SET_DISCOVERY = 0x05,
 };
 
 enum pdec_binary_msg {
@@ -26,6 +28,7 @@ enum pdec_binary_msg {
     PDEC_BINARY_MSG_DISTANCE = 0x82,
     PDEC_BINARY_MSG_DEVICE_LIST = 0x83,
     PDEC_BINARY_MSG_SEND_DATA_RESULT = 0x84,
+    PDEC_BINARY_MSG_DISCOVERY_STATE = 0x85,
     PDEC_BINARY_MSG_RANGING_EVENT = 0x90,
     PDEC_BINARY_MSG_DATA_EVENT = 0x91,
     PDEC_BINARY_MSG_TDOA_REPORT_EVENT = 0x92,
@@ -290,6 +293,26 @@ static void handle_send_data_cmd(enum pdec_serial_port port, const uint8_t *payl
                                                 sizeof(response));
 }
 
+static void handle_set_discovery_cmd(enum pdec_serial_port port, const uint8_t *payload, uint8_t len)
+{
+    if (len != 2) {
+        send_error(port, PDEC_BINARY_CMD_SET_DISCOVERY, PDEC_BINARY_STATUS_INVALID_LENGTH);
+        return;
+    }
+    if (payload[1] > 1) {
+        send_error(port, PDEC_BINARY_CMD_SET_DISCOVERY, PDEC_BINARY_STATUS_ERROR);
+        return;
+    }
+
+    pdec_discovery_set_enabled(payload[1] != 0);
+    const uint8_t response[] = {
+        PDEC_BINARY_MSG_DISCOVERY_STATE,
+        PDEC_BINARY_STATUS_OK,
+        pdec_discovery_is_enabled() ? 1 : 0,
+    };
+    (void)pdec_uart_protocol_write_binary_frame(port, response, sizeof(response));
+}
+
 void pdec_uart_on_binary_frame(enum pdec_serial_port port, const uint8_t *payload, uint8_t len, uint8_t chk)
 {
     ARG_UNUSED(chk);
@@ -311,6 +334,9 @@ void pdec_uart_on_binary_frame(enum pdec_serial_port port, const uint8_t *payloa
         break;
     case PDEC_BINARY_CMD_SEND_DATA:
         handle_send_data_cmd(port, payload, len);
+        break;
+    case PDEC_BINARY_CMD_SET_DISCOVERY:
+        handle_set_discovery_cmd(port, payload, len);
         break;
     default:
         send_error(port, payload[0], PDEC_BINARY_STATUS_ERROR);
